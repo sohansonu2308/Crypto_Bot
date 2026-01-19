@@ -36,9 +36,22 @@ def get_fear_greed():
 
 
 def get_daily_klines():
-    params = {"symbol": "BTCUSDT", "interval": "1d", "limit": 30}
-    r = requests.get(BINANCE_SPOT, params=params, timeout=10)
-    return r.json()
+    try:
+        params = {"symbol": "BTCUSDT", "interval": "1d", "limit": 30}
+        r = requests.get(BINANCE_SPOT, params=params, timeout=10)
+        data = r.json()
+
+        # Valid kline response = list of lists
+        if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
+            return data
+
+        # Any unexpected response
+        print(f"[WARN] Invalid kline data: {data}")
+        return []
+
+    except Exception as e:
+        print(f"[WARN] Kline fetch failed: {e}")
+        return []
 
 
 def get_funding_rate():
@@ -73,18 +86,34 @@ def get_funding_rate():
 # ========= FEATURE ENGINE =========
 
 def get_trend(klines):
-    closes = [float(k[4]) for k in klines]
-    if closes[-1] > closes[-5] > closes[-10]:
-        return "UP"
-    if closes[-1] < closes[-5] < closes[-10]:
-        return "DOWN"
-    return "RANGE"
+    if not klines or len(klines) < 10:
+        return "RANGE"
+
+    try:
+        closes = [float(k[4]) for k in klines]
+        if closes[-1] > closes[-5] > closes[-10]:
+            return "UP"
+        if closes[-1] < closes[-5] < closes[-10]:
+            return "DOWN"
+        return "RANGE"
+    except Exception as e:
+        print(f"[WARN] Trend calc failed: {e}")
+        return "RANGE"
+
 
 
 def get_volume_ratio(klines):
-    volumes = [float(k[5]) for k in klines]
-    avg_20 = sum(volumes[-21:-1]) / 20
-    return volumes[-1] / avg_20
+    if not klines or len(klines) < 21:
+        return 1.0
+
+    try:
+        volumes = [float(k[5]) for k in klines]
+        avg_20 = sum(volumes[-21:-1]) / 20
+        return volumes[-1] / avg_20 if avg_20 > 0 else 1.0
+    except Exception as e:
+        print(f"[WARN] Volume calc failed: {e}")
+        return 1.0
+
 
 
 # ========= META STATE =========
@@ -240,4 +269,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
