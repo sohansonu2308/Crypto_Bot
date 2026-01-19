@@ -42,12 +42,32 @@ def get_daily_klines():
 
 
 def get_funding_rate():
-    r = requests.get(
-        BINANCE_FUTURES,
-        params={"symbol": "BTCUSDT"},
-        timeout=10
-    )
-    return float(r.json()["lastFundingRate"])
+    try:
+        r = requests.get(
+            BINANCE_FUTURES,
+            params={"symbol": "BTCUSDT"},
+            timeout=10
+        )
+        data = r.json()
+
+        # Case 1: normal dict response
+        if isinstance(data, dict) and "lastFundingRate" in data:
+            return float(data["lastFundingRate"])
+
+        # Case 2: list response (sometimes happens)
+        if isinstance(data, list):
+            for item in data:
+                if item.get("symbol") == "BTCUSDT":
+                    return float(item.get("lastFundingRate", 0.0))
+
+        # Any other unexpected response
+        return 0.0
+
+    except Exception as e:
+        # Fail safe: treat as neutral funding
+        print(f"[WARN] Funding rate fetch failed: {e}")
+        return 0.0
+
 
 
 # ========= FEATURE ENGINE =========
@@ -220,3 +240,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
