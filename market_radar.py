@@ -57,7 +57,7 @@ def get_fear_greed():
 
 
 def get_daily_klines():
-    params = {"symbol": "BTCUSDT", "interval": "1d", "limit": 40}
+    params = {"symbol": "BTCUSDT", "interval": "1d", "limit": 60}
     data = safe_get_json(BINANCE_SPOT, params=params)
 
     if isinstance(data, list) and len(data) > 0 and isinstance(data[0], list):
@@ -105,6 +105,14 @@ def get_trend(klines):
     except Exception as e:
         print(f"[WARN] Trend calc failed: {e}")
         return "RANGE"
+
+
+def get_regime(trend):
+    if trend == "UP":
+        return "BULL_MODE"
+    if trend == "DOWN":
+        return "BEAR_MODE"
+    return "CHOP_MODE"
 
 
 def get_volume_ratio(klines):
@@ -160,6 +168,39 @@ def parse_dt(s):
         return None
 
 
+# ========= GLITCH WINDOW =========
+
+def glitch_active(meta):
+    start = meta.get("glitch_start_utc")
+    if not start:
+        return False
+
+    dt = parse_dt(start)
+    if not dt:
+        return False
+
+    return utc_now() <= dt + timedelta(days=GLITCH_DAYS)
+
+
+def start_glitch(meta, direction):
+    """
+    direction: "BEAR_GLITCH" or "BULL_GLITCH"
+    """
+    meta["glitch_start_utc"] = utc_now().isoformat()
+    meta["glitch_direction"] = direction
+    return meta
+
+
+def stop_glitch(meta):
+    meta.pop("glitch_start_utc", None)
+    meta.pop("glitch_direction", None)
+    return meta
+
+
+def get_glitch_direction(meta):
+    return meta.get("glitch_direction", "UNKNOWN")
+
+
 # ========= SCORES =========
 
 def compute_confidence(trend, fear, funding, volume_ratio, retail_flag):
@@ -191,64 +232,56 @@ def compute_confidence(trend, fear, funding, volume_ratio, retail_flag):
     return max(0, min(score, 100))
 
 
-def compute_health(trend, fear, funding, volume_ratio, capitulation_risk, retail_flag, absorption, glitch_active):
+def compute_health(regime, fear, funding, capitulation_risk, retail_flag, absorption, g_active, g_dir):
+    """
+    Health = how safe it is to deploy risk NOW.
+    Regime-aware:
+      - In BEAR mode, glitch means ignore pumps -> health penalty stronger
+      - In BULL mode, glitch means ignore dumps -> penalty smaller (more opportunity)
+    """
     score = 50
 
+    # retail crowding always reduces health
     if retail_flag:
         score -= 20
 
+    # capitulation is dangerous in any regime
     if capitulation_risk:
         score -= 25
 
-    if glitch_active:
-        score -= 15  # key: reduce risk during "deceptive pump" window
+    # glitch window penalty depends on direction
+    if g_active:
+        if g_dir == "BEAR_GLITCH":
+            score -= 18
+        elif g_dir == "BULL_GLITCH":
+            score -= 8
+        else:
+            score -= 12
 
+    # low funding improves health slightly
     if funding < 0.0:
         score += 10
     elif funding < FUNDING_RETAIL:
         score += 5
 
+    # absorption is high quality (improves health)
     if absorption:
         score += 20
 
-    if trend == "DOWN" and not absorption:
-        score -= 10
-
+    # deep fear = good long-term, but adds short-term volatility risk
     if fear < FEAR_DEEP:
         score -= 5
+
+    # regime shaping
+    if regime == "BEAR_MODE" and not absorption:
+        score -= 7
+    elif regime == "BULL_MODE" and not retail_flag:
+        score += 5
 
     return max(0, min(score, 100))
 
 
-# ========= GLITCH WINDOW =========
-
-def glitch_active(meta):
-    """
-    GLITCH window = 4 days after a high-risk regime appears.
-    During this time: avoid trusting short-term pumps.
-    """
-    start = meta.get("glitch_start_utc")
-    if not start:
-        return False
-
-    dt = parse_dt(start)
-    if not dt:
-        return False
-
-    return utc_now() <= dt + timedelta(days=GLITCH_DAYS)
-
-
-def start_glitch(meta):
-    meta["glitch_start_utc"] = utc_now().isoformat()
-    return meta
-
-
-def stop_glitch(meta):
-    meta.pop("glitch_start_utc", None)
-    return meta
-
-
-# ========= STATE ENGINE (V2.1 with GLITCH WINDOW) =========
+# ========= STATE ENGINE (V2.2 Regime Mode) =========
 
 def detect_market_state():
     fear = get_fear_greed()
@@ -256,6 +289,7 @@ def detect_market_state():
     klines = get_daily_klines()
 
     trend = get_trend(klines)
+    regime = get_regime(trend)
     volume_ratio = get_volume_ratio(klines)
     change_5d = get_recent_change_pct(klines, days=5)
 
@@ -263,6 +297,7 @@ def detect_market_state():
 
     retail_entry = (funding >= FUNDING_RETAIL and volume_ratio >= VOLUME_RETAIL)
 
+    # Capitulation: big down move + huge volume + fear
     capitulation_risk = (
         fear < FEAR_DEEP
         and volume_ratio >= VOLUME_CAPITULATION
@@ -270,21 +305,37 @@ def detect_market_state():
         and change_5d < -3.0
     )
 
-    lag_window_active = (
+    # Bear lag: fear is deep but market isn't done yet
+    bear_lag_window = (
         fear < FEAR_DEEP
         and funding <= FUNDING_RETAIL
         and trend in ["DOWN", "RANGE"]
         and not capitulation_risk
     )
 
-    # Glitch window activation logic:
-    # if we detect ANY high-risk regime, start glitch window (if not already active)
-    high_risk_regime = capitulation_risk or lag_window_active or retail_entry
+    # Bull lag: trend UP, but market does shakeout dumps (we approximate via small negative 5d or flat)
+    bull_lag_window = (
+        regime == "BULL_MODE"
+        and funding < FUNDING_RETAIL
+        and fear < FEAR_EUPHORIA
+        and change_5d < 1.0  # trend up but recent stall/shake
+    )
 
-    if high_risk_regime and not glitch_active(meta):
-        meta = start_glitch(meta)
+    # High-risk regime triggers glitch window:
+    # - Bear: capitulation or bear lag
+    # - Bull: bull lag OR retail trap (whipsaws)
+    high_risk = capitulation_risk or bear_lag_window or bull_lag_window or retail_entry
 
-    # Absorption detection
+    if high_risk and not glitch_active(meta):
+        # pick glitch direction based on regime
+        if regime == "BEAR_MODE" or bear_lag_window or capitulation_risk:
+            meta = start_glitch(meta, "BEAR_GLITCH")
+        elif regime == "BULL_MODE":
+            meta = start_glitch(meta, "BULL_GLITCH")
+        else:
+            meta = start_glitch(meta, "BEAR_GLITCH")
+
+    # Absorption detection (bear bottoming style)
     prev_capitulation = meta.get("capitulation_recent", False)
     if capitulation_risk:
         meta["capitulation_recent"] = True
@@ -298,23 +349,26 @@ def detect_market_state():
 
     if absorption:
         meta["capitulation_recent"] = False
-        # Once absorption is detected, glitch window can be safely turned off early
         meta = stop_glitch(meta)
 
     g_active = glitch_active(meta)
+    g_dir = get_glitch_direction(meta)
+
     save_meta(meta)
 
     confidence = compute_confidence(trend, fear, funding, volume_ratio, retail_entry)
-    health = compute_health(trend, fear, funding, volume_ratio, capitulation_risk, retail_entry, absorption, g_active)
+    health = compute_health(regime, fear, funding, capitulation_risk, retail_entry, absorption, g_active, g_dir)
 
-    # Primary State Selection
+    # ---- State selection ----
     if capitulation_risk:
         state = "CAPITULATION_RISK"
     elif absorption:
         state = "ABSORPTION_DETECTED"
     elif g_active:
         state = "GLITCH_WINDOW_ACTIVE"
-    elif lag_window_active:
+    elif bear_lag_window:
+        state = "LAG_WINDOW_ACTIVE"
+    elif bull_lag_window:
         state = "LAG_WINDOW_ACTIVE"
     elif fear < FEAR_DEEP and funding <= 0:
         state = "DEEP_FEAR"
@@ -329,7 +383,7 @@ def detect_market_state():
     else:
         state = "NEUTRAL"
 
-    return state, confidence, health, fear, funding, volume_ratio, trend, change_5d, g_active
+    return state, regime, confidence, health, fear, funding, volume_ratio, trend, change_5d, g_active, g_dir
 
 
 # ========= NOTIFICATION =========
@@ -363,30 +417,36 @@ def save_state(state):
 # ========= MAIN =========
 
 def main():
-    state, confidence, health, fear, funding, vol, trend, change_5d, g_active = detect_market_state()
+    state, regime, confidence, health, fear, funding, vol, trend, change_5d, g_active, g_dir = detect_market_state()
     last_state = load_last_state()
 
     if state != last_state:
+        glitch_text = ""
+        if g_active:
+            if g_dir == "BEAR_GLITCH":
+                glitch_text = "⚠️ GLITCH (BEAR): Ignore pumps. No chasing."
+            elif g_dir == "BULL_GLITCH":
+                glitch_text = "⚠️ GLITCH (BULL): Ignore dumps. Stop-hunt risk."
+            else:
+                glitch_text = "⚠️ GLITCH: Lag/whipsaw zone active."
+
         action_map = {
             "CAPITULATION_RISK": "Bloodbath risk. NO leverage. Wait.",
             "ABSORPTION_DETECTED": "Absorption detected. Begin real spot accumulation.",
-            "GLITCH_WINDOW_ACTIVE": "GLITCH window active (4D). Ignore pumps/wicks. Risk-off.",
-            "LAG_WINDOW_ACTIVE": "Lag window active. Patience. No aggressive longs.",
+            "GLITCH_WINDOW_ACTIVE": "Glitch window active (4D). Trade TIME, not price.",
+            "LAG_WINDOW_ACTIVE": "Lag window active. Patience. Avoid over-risk.",
             "DEEP_FEAR": "Accumulate slowly. x2 max (spot preferred).",
             "PRE_START": "Accumulate. No aggression.",
             "START_CONFIRMED": "Hold/add on pullbacks. x3 allowed.",
-            "LIQUIDITY_TRAP": "DO NOTHING. Bounce likely traps. Expect pullback.",
+            "LIQUIDITY_TRAP": "DO NOTHING. Crowded zone. Expect pullback.",
             "EUPHORIA": "Scale out. Protect capital.",
             "NEUTRAL": "Stand by."
         }
 
-        extra = ""
-        if g_active:
-            extra = "\n⚠️ GLITCH: Time-based lag zone. Price can fake you out."
-
         msg = (
-            f"📡 MARKET STATE UPDATE (V2.1)\n\n"
+            f"📡 MARKET STATE UPDATE (V2.2)\n\n"
             f"State: {state}\n"
+            f"Regime: {regime}\n"
             f"Trend: {trend}\n"
             f"5D Change: {change_5d:.2f}%\n\n"
             f"Confidence: {confidence}/100\n"
@@ -394,8 +454,8 @@ def main():
             f"Action: {action_map.get(state, 'Stand by.')}\n\n"
             f"Fear & Greed: {fear}\n"
             f"Funding: {funding:.4f}\n"
-            f"Volume Ratio: {vol:.2f}"
-            f"{extra}\n\n"
+            f"Volume Ratio: {vol:.2f}\n\n"
+            f"{glitch_text}\n\n"
             f"Time: {utc_now().isoformat()}"
         )
 
