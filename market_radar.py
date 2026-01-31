@@ -15,7 +15,6 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 STATE_FILE = "last_state.json"
 META_FILE = "meta_state.json"
 
-# Analyst-aligned thresholds
 FEAR_DEEP = 30
 FEAR_EUPHORIA = 75
 
@@ -28,8 +27,11 @@ VOLUME_RETAIL = 1.8
 VOLUME_CAPITULATION = 2.2
 VOLUME_NORMAL = 1.2
 
-# Glitch Window (Four Day Window)
 GLITCH_DAYS = 4
+
+# Candle-confirm thresholds
+WICK_RATIO_CONFIRM = 0.55  # >55% wick dominance means fakeout/stop-hunt like behavior
+RANGE_SPIKE_MULT = 1.25    # range vs avg range
 
 
 # ========= HELPERS =========
@@ -146,6 +148,60 @@ def get_recent_change_pct(klines, days=5):
         return 0.0
 
 
+def candle_metrics_from_kline(k):
+    """
+    kline format:
+    [open_time, open, high, low, close, volume, close_time, ...]
+    """
+    o = float(k[1])
+    h = float(k[2])
+    l = float(k[3])
+    c = float(k[4])
+
+    body = abs(c - o)
+    rng = max(1e-9, (h - l))
+    wick = rng - body
+    wick_ratio = wick / rng
+
+    green = c >= o
+    red = c < o
+
+    return {
+        "open": o,
+        "high": h,
+        "low": l,
+        "close": c,
+        "range": rng,
+        "body": body,
+        "wick": wick,
+        "wick_ratio": wick_ratio,
+        "green": green,
+        "red": red
+    }
+
+
+def get_range_multiplier(klines, lookback=20):
+    """
+    How big today's range is vs average range.
+    """
+    if not klines or len(klines) < lookback + 2:
+        return 1.0
+
+    try:
+        ranges = []
+        for k in klines[-(lookback + 1):-1]:
+            m = candle_metrics_from_kline(k)
+            ranges.append(m["range"])
+        avg_range = sum(ranges) / len(ranges)
+        last_range = candle_metrics_from_kline(klines[-1])["range"]
+        if avg_range <= 0:
+            return 1.0
+        return last_range / avg_range
+    except Exception as e:
+        print(f"[WARN] Range multiplier calc failed: {e}")
+        return 1.0
+
+
 # ========= META STATE =========
 
 def load_meta():
@@ -168,24 +224,20 @@ def parse_dt(s):
         return None
 
 
-# ========= GLITCH WINDOW =========
+# ========= GLITCH WINDOW (Hybrid) =========
 
-def glitch_active(meta):
+def glitch_watch_active(meta):
+    """Time-based 4-day watch window."""
     start = meta.get("glitch_start_utc")
     if not start:
         return False
-
     dt = parse_dt(start)
     if not dt:
         return False
-
     return utc_now() <= dt + timedelta(days=GLITCH_DAYS)
 
 
-def start_glitch(meta, direction):
-    """
-    direction: "BEAR_GLITCH" or "BULL_GLITCH"
-    """
+def start_glitch_watch(meta, direction):
     meta["glitch_start_utc"] = utc_now().isoformat()
     meta["glitch_direction"] = direction
     return meta
@@ -194,11 +246,51 @@ def start_glitch(meta, direction):
 def stop_glitch(meta):
     meta.pop("glitch_start_utc", None)
     meta.pop("glitch_direction", None)
+    meta.pop("glitch_confirmed", None)
     return meta
 
 
 def get_glitch_direction(meta):
     return meta.get("glitch_direction", "UNKNOWN")
+
+
+def confirm_glitch_if_needed(meta, regime, last_candle, range_mult):
+    """
+    Candle-confirmed glitch logic:
+      - BEAR_GLITCH: green candle with big wicks / rejection during bear/chop
+      - BULL_GLITCH: red candle with big wicks / stop-hunt during bull
+    """
+    if not glitch_watch_active(meta):
+        meta["glitch_confirmed"] = False
+        return meta
+
+    direction = get_glitch_direction(meta)
+    wick_ratio = last_candle["wick_ratio"]
+
+    bear_confirm = (
+        direction == "BEAR_GLITCH"
+        and regime in ["BEAR_MODE", "CHOP_MODE"]
+        and last_candle["green"]
+        and wick_ratio >= WICK_RATIO_CONFIRM
+    )
+
+    bull_confirm = (
+        direction == "BULL_GLITCH"
+        and regime == "BULL_MODE"
+        and last_candle["red"]
+        and wick_ratio >= WICK_RATIO_CONFIRM
+    )
+
+    if bear_confirm or bull_confirm or range_mult >= RANGE_SPIKE_MULT:
+        meta["glitch_confirmed"] = True
+    else:
+        meta["glitch_confirmed"] = False
+
+    return meta
+
+
+def glitch_confirmed(meta):
+    return bool(meta.get("glitch_confirmed", False))
 
 
 # ========= SCORES =========
@@ -232,25 +324,17 @@ def compute_confidence(trend, fear, funding, volume_ratio, retail_flag):
     return max(0, min(score, 100))
 
 
-def compute_health(regime, fear, funding, capitulation_risk, retail_flag, absorption, g_active, g_dir):
-    """
-    Health = how safe it is to deploy risk NOW.
-    Regime-aware:
-      - In BEAR mode, glitch means ignore pumps -> health penalty stronger
-      - In BULL mode, glitch means ignore dumps -> penalty smaller (more opportunity)
-    """
+def compute_health(regime, fear, funding, capitulation_risk, retail_flag, absorption, glitch_conf, g_dir):
     score = 50
 
-    # retail crowding always reduces health
     if retail_flag:
         score -= 20
 
-    # capitulation is dangerous in any regime
     if capitulation_risk:
         score -= 25
 
-    # glitch window penalty depends on direction
-    if g_active:
+    # Only penalize HEALTH if glitch is CONFIRMED by candles
+    if glitch_conf:
         if g_dir == "BEAR_GLITCH":
             score -= 18
         elif g_dir == "BULL_GLITCH":
@@ -258,21 +342,17 @@ def compute_health(regime, fear, funding, capitulation_risk, retail_flag, absorp
         else:
             score -= 12
 
-    # low funding improves health slightly
     if funding < 0.0:
         score += 10
     elif funding < FUNDING_RETAIL:
         score += 5
 
-    # absorption is high quality (improves health)
     if absorption:
         score += 20
 
-    # deep fear = good long-term, but adds short-term volatility risk
     if fear < FEAR_DEEP:
         score -= 5
 
-    # regime shaping
     if regime == "BEAR_MODE" and not absorption:
         score -= 7
     elif regime == "BULL_MODE" and not retail_flag:
@@ -281,7 +361,7 @@ def compute_health(regime, fear, funding, capitulation_risk, retail_flag, absorp
     return max(0, min(score, 100))
 
 
-# ========= STATE ENGINE (V2.2 Regime Mode) =========
+# ========= STATE ENGINE (V2.3 Hybrid Candle GLITCH) =========
 
 def detect_market_state():
     fear = get_fear_greed()
@@ -295,9 +375,13 @@ def detect_market_state():
 
     meta = load_meta()
 
+    last_candle = candle_metrics_from_kline(klines[-1]) if klines else {
+        "wick_ratio": 0.0, "green": False, "red": False, "range": 0, "body": 0
+    }
+    range_mult = get_range_multiplier(klines, lookback=20)
+
     retail_entry = (funding >= FUNDING_RETAIL and volume_ratio >= VOLUME_RETAIL)
 
-    # Capitulation: big down move + huge volume + fear
     capitulation_risk = (
         fear < FEAR_DEEP
         and volume_ratio >= VOLUME_CAPITULATION
@@ -305,7 +389,6 @@ def detect_market_state():
         and change_5d < -3.0
     )
 
-    # Bear lag: fear is deep but market isn't done yet
     bear_lag_window = (
         fear < FEAR_DEEP
         and funding <= FUNDING_RETAIL
@@ -313,29 +396,24 @@ def detect_market_state():
         and not capitulation_risk
     )
 
-    # Bull lag: trend UP, but market does shakeout dumps (we approximate via small negative 5d or flat)
     bull_lag_window = (
         regime == "BULL_MODE"
         and funding < FUNDING_RETAIL
         and fear < FEAR_EUPHORIA
-        and change_5d < 1.0  # trend up but recent stall/shake
+        and change_5d < 1.0
     )
 
-    # High-risk regime triggers glitch window:
-    # - Bear: capitulation or bear lag
-    # - Bull: bull lag OR retail trap (whipsaws)
     high_risk = capitulation_risk or bear_lag_window or bull_lag_window or retail_entry
-
-    if high_risk and not glitch_active(meta):
-        # pick glitch direction based on regime
+    if high_risk and not glitch_watch_active(meta):
         if regime == "BEAR_MODE" or bear_lag_window or capitulation_risk:
-            meta = start_glitch(meta, "BEAR_GLITCH")
+            meta = start_glitch_watch(meta, "BEAR_GLITCH")
         elif regime == "BULL_MODE":
-            meta = start_glitch(meta, "BULL_GLITCH")
+            meta = start_glitch_watch(meta, "BULL_GLITCH")
         else:
-            meta = start_glitch(meta, "BEAR_GLITCH")
+            meta = start_glitch_watch(meta, "BEAR_GLITCH")
 
-    # Absorption detection (bear bottoming style)
+    meta = confirm_glitch_if_needed(meta, regime, last_candle, range_mult)
+
     prev_capitulation = meta.get("capitulation_recent", False)
     if capitulation_risk:
         meta["capitulation_recent"] = True
@@ -351,24 +429,22 @@ def detect_market_state():
         meta["capitulation_recent"] = False
         meta = stop_glitch(meta)
 
-    g_active = glitch_active(meta)
-    g_dir = get_glitch_direction(meta)
-
     save_meta(meta)
 
-    confidence = compute_confidence(trend, fear, funding, volume_ratio, retail_entry)
-    health = compute_health(regime, fear, funding, capitulation_risk, retail_entry, absorption, g_active, g_dir)
+    g_watch = glitch_watch_active(meta)
+    g_conf = glitch_confirmed(meta)
+    g_dir = get_glitch_direction(meta)
 
-    # ---- State selection ----
+    confidence = compute_confidence(trend, fear, funding, volume_ratio, retail_entry)
+    health = compute_health(regime, fear, funding, capitulation_risk, retail_entry, absorption, g_conf, g_dir)
+
     if capitulation_risk:
         state = "CAPITULATION_RISK"
     elif absorption:
         state = "ABSORPTION_DETECTED"
-    elif g_active:
+    elif g_watch and g_conf:
         state = "GLITCH_WINDOW_ACTIVE"
-    elif bear_lag_window:
-        state = "LAG_WINDOW_ACTIVE"
-    elif bull_lag_window:
+    elif bear_lag_window or bull_lag_window:
         state = "LAG_WINDOW_ACTIVE"
     elif fear < FEAR_DEEP and funding <= 0:
         state = "DEEP_FEAR"
@@ -383,7 +459,22 @@ def detect_market_state():
     else:
         state = "NEUTRAL"
 
-    return state, regime, confidence, health, fear, funding, volume_ratio, trend, change_5d, g_active, g_dir
+    return {
+        "state": state,
+        "regime": regime,
+        "trend": trend,
+        "confidence": confidence,
+        "health": health,
+        "fear": fear,
+        "funding": funding,
+        "volume_ratio": volume_ratio,
+        "change_5d": change_5d,
+        "glitch_watch": g_watch,
+        "glitch_confirmed": g_conf,
+        "glitch_direction": g_dir,
+        "wick_ratio": last_candle.get("wick_ratio", 0.0),
+        "range_mult": range_mult
+    }
 
 
 # ========= NOTIFICATION =========
@@ -417,23 +508,27 @@ def save_state(state):
 # ========= MAIN =========
 
 def main():
-    state, regime, confidence, health, fear, funding, vol, trend, change_5d, g_active, g_dir = detect_market_state()
+    r = detect_market_state()
+    state = r["state"]
     last_state = load_last_state()
 
     if state != last_state:
-        glitch_text = ""
-        if g_active:
-            if g_dir == "BEAR_GLITCH":
-                glitch_text = "⚠️ GLITCH (BEAR): Ignore pumps. No chasing."
-            elif g_dir == "BULL_GLITCH":
-                glitch_text = "⚠️ GLITCH (BULL): Ignore dumps. Stop-hunt risk."
+        glitch_line = ""
+        if r["glitch_watch"]:
+            if r["glitch_confirmed"]:
+                if r["glitch_direction"] == "BEAR_GLITCH":
+                    glitch_line = "⚠️ GLITCH CONFIRMED (BEAR): Ignore pumps. No chasing."
+                elif r["glitch_direction"] == "BULL_GLITCH":
+                    glitch_line = "⚠️ GLITCH CONFIRMED (BULL): Ignore dumps. Stop-hunt risk."
+                else:
+                    glitch_line = "⚠️ GLITCH CONFIRMED: Lag/whipsaw zone."
             else:
-                glitch_text = "⚠️ GLITCH: Lag/whipsaw zone active."
+                glitch_line = "🟡 Glitch WATCH: timer active, candle not confirmed yet."
 
         action_map = {
             "CAPITULATION_RISK": "Bloodbath risk. NO leverage. Wait.",
             "ABSORPTION_DETECTED": "Absorption detected. Begin real spot accumulation.",
-            "GLITCH_WINDOW_ACTIVE": "Glitch window active (4D). Trade TIME, not price.",
+            "GLITCH_WINDOW_ACTIVE": "Glitch active. Trade TIME not price.",
             "LAG_WINDOW_ACTIVE": "Lag window active. Patience. Avoid over-risk.",
             "DEEP_FEAR": "Accumulate slowly. x2 max (spot preferred).",
             "PRE_START": "Accumulate. No aggression.",
@@ -444,18 +539,20 @@ def main():
         }
 
         msg = (
-            f"📡 MARKET STATE UPDATE (V2.2)\n\n"
-            f"State: {state}\n"
-            f"Regime: {regime}\n"
-            f"Trend: {trend}\n"
-            f"5D Change: {change_5d:.2f}%\n\n"
-            f"Confidence: {confidence}/100\n"
-            f"Health: {health}/100\n"
-            f"Action: {action_map.get(state, 'Stand by.')}\n\n"
-            f"Fear & Greed: {fear}\n"
-            f"Funding: {funding:.4f}\n"
-            f"Volume Ratio: {vol:.2f}\n\n"
-            f"{glitch_text}\n\n"
+            f"📡 MARKET STATE UPDATE (V2.3)\n\n"
+            f"State: {r['state']}\n"
+            f"Regime: {r['regime']}\n"
+            f"Trend: {r['trend']}\n"
+            f"5D Change: {r['change_5d']:.2f}%\n\n"
+            f"Confidence: {r['confidence']}/100\n"
+            f"Health: {r['health']}/100\n"
+            f"Action: {action_map.get(r['state'], 'Stand by.')}\n\n"
+            f"Fear & Greed: {r['fear']}\n"
+            f"Funding: {r['funding']:.4f}\n"
+            f"Volume Ratio: {r['volume_ratio']:.2f}\n"
+            f"Wick Ratio: {r['wick_ratio']:.2f}\n"
+            f"Range Mult: {r['range_mult']:.2f}\n\n"
+            f"{glitch_line}\n\n"
             f"Time: {utc_now().isoformat()}"
         )
 
