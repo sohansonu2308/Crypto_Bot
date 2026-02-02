@@ -24,6 +24,7 @@ jobs:
           path: |
             last_state.json
             meta_state.json
+            last_snapshot.json
           key: market-radar-state-v1
           restore-keys: |
             market-radar-state-
@@ -46,4 +47,5 @@ jobs:
           path: |
             last_state.json
             meta_state.json
+            last_snapshot.json
           key: market-radar-state-v1
