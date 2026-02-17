@@ -5,11 +5,12 @@ BINANCE="https://api.binance.com/api/v3/klines"
 FUTURES="https://fapi.binance.com/fapi/v1/premiumIndex"
 FNG="https://api.alternative.me/fng/"
 COINGECKO="https://api.coingecko.com/api/v3/global"
-API_HEALTH = "OK"
-
 
 TOKEN=os.getenv("TELEGRAM_TOKEN")
 CHAT=os.getenv("TELEGRAM_CHAT_ID")
+
+API_HEALTH="OK"
+DATA={}
 
 # ================= HELPERS =================
 
@@ -18,49 +19,45 @@ def now():
 
 def get(url,params=None):
     try:
-        return requests.get(url,params=params,timeout=10).json()
+        r=requests.get(url,params=params,timeout=10)
+        if r.status_code==200:
+            return r.json()
     except:
-        return None
+        pass
+    # retry once
+    try:
+        r=requests.get(url,params=params,timeout=10)
+        if r.status_code==200:
+            return r.json()
+    except:
+        pass
+    return None
 
 def klines(sym,tf,lim):
     global API_HEALTH
-    data = get(BINANCE,{"symbol":sym,"interval":tf,"limit":lim})
-
+    data=get(BINANCE,{"symbol":sym,"interval":tf,"limit":lim})
     if isinstance(data,list):
         return data
-
-    # mark degraded health
-    API_HEALTH = "DEGRADED"
+    API_HEALTH="DEGRADED"
     return []
 
-
-
 def closes(k):
-    if not isinstance(k,list):
-        return []
     out=[]
+    if not isinstance(k,list):return out
     for x in k:
         if isinstance(x,list) and len(x)>4:
-            try:
-                out.append(float(x[4]))
-            except:
-                pass
+            try: out.append(float(x[4]))
+            except: pass
     return out
 
-def vols(k):
-    if not isinstance(k,list):
-        return []
-    out=[]
-    for x in k:
-        if isinstance(x,list) and len(x)>5:
-            try:
-                out.append(float(x[5]))
-            except:
-                pass
-    return out
+# ================= DATA LOAD (NEW CORE) =================
 
+def load_data():
+    DATA["btc_d"]=klines("BTCUSDT","1d",40)
+    DATA["eth_d"]=klines("ETHUSDT","1d",20)
+    DATA["ethbtc_d"]=klines("ETHBTC","1d",20)
 
-# ================= DATA =================
+# ================= MARKET DATA =================
 
 def fear():
     d=get(FNG)
@@ -78,8 +75,7 @@ def dominance():
 
 # ================= STRUCTURE =================
 
-def trend(k):
-    c=closes(k)
+def trend_from(c):
     if len(c)<10:return"RANGE"
     if c[-1]>c[-5]>c[-10]:return"UP"
     if c[-1]<c[-5]<c[-10]:return"DOWN"
@@ -89,15 +85,13 @@ def pct(c,n):
     if len(c)<n+1:return 0
     return((c[-1]-c[-n-1])/c[-n-1])*100
 
-# ================= LAG ENGINE =================
+# ================= ENGINES =================
 
 def lag_phase():
-    d=klines("BTCUSDT","1d",40)
-    if len(d)<20:return"NONE"
-
-    tr=trend(d)
-    change=pct(closes(d),5)
+    btc=closes(DATA["btc_d"])
+    tr=trend_from(btc)
     fr=fear()
+    change=pct(btc,5)
 
     if fr>35:return"NONE"
     if tr=="DOWN" and change<-6:return"EARLY_LAG"
@@ -105,32 +99,26 @@ def lag_phase():
     if tr in["RANGE","UP"]:return"LATE_LAG"
     return"LAG_ACTIVE"
 
-# ================= ROTATION ENGINE =================
-
 def rotation_phase():
-    ethbtc=klines("ETHBTC","1d",20)
-    if len(ethbtc)<10:return"BTC_LED"
-
-    tr=trend(ethbtc)
+    ethbtc=closes(DATA["ethbtc_d"])
+    tr=trend_from(ethbtc)
     dom=dominance()
 
     if tr=="UP" and dom<55:return"ALT_EXPANSION"
     if tr=="UP":return"TRANSITION"
     return"BTC_LED"
 
-# ================= ALT MOMENTUM =================
-
 def alt_momentum():
-    ethbtc=klines("ETHBTC","1d",15)
-    btc=klines("BTCUSDT","1d",15)
-    eth=klines("ETHUSDT","1d",15)
+    ethbtc=closes(DATA["ethbtc_d"])
+    btc=closes(DATA["btc_d"])
+    eth=closes(DATA["eth_d"])
 
     if len(ethbtc)<10:return 50
 
     score=50
 
-    if trend(ethbtc)=="UP":score+=15
-    if pct(closes(eth),5)>pct(closes(btc),5):score+=15
+    if trend_from(ethbtc)=="UP":score+=15
+    if pct(eth,5)>pct(btc,5):score+=15
 
     dom=dominance()
     if dom<55:score+=10
@@ -138,35 +126,17 @@ def alt_momentum():
 
     return max(0,min(100,score))
 
-# ================= NEW LIQUIDITY STAGE ENGINE =================
-
 def liquidity_stage():
-    d=klines("BTCUSDT","1d",30)
+    btc=closes(DATA["btc_d"])
+    tr=trend_from(btc)
     fr=fear()
-    f=funding()
     dom=dominance()
 
-    tr=trend(d)
-
-    # BUILDING = early cycle fear but not trending
-    if fr<35 and tr=="DOWN":
-        return"BUILDING"
-
-    # PEAKING = dominance high + trend up
-    if dom>58 and tr=="UP":
-        return"PEAKING"
-
-    # REVERSING = fear low + dominance falling
-    if fr<30 and dom<56:
-        return"REVERSING"
-
-    # DRAINING = trend down but fear rising
-    if tr=="DOWN" and fr>35:
-        return"DRAINING"
-
+    if fr<35 and tr=="DOWN":return"BUILDING"
+    if dom>58 and tr=="UP":return"PEAKING"
+    if fr<30 and dom<56:return"REVERSING"
+    if tr=="DOWN" and fr>35:return"DRAINING"
     return"NEUTRAL"
-
-# ================= LIQUIDITY VECTOR =================
 
 def liquidity_vector(lag,stage):
     f=funding()
@@ -174,24 +144,16 @@ def liquidity_vector(lag,stage):
 
     if stage=="REVERSING" and lag in["MID_LAG","LATE_LAG"]:
         return"UPWARD_HUNT"
-
     if lag=="EARLY_LAG":
         return"DOWNWARD_HUNT"
-
     if fr<30 and f<=0:
         return"ABSORBING"
-
     return"NEUTRAL"
 
-# ================= MACRO FLOW =================
-
 def macro_flow(stage):
-    if stage=="REVERSING":
-        return"PRE_EXPANSION"
-    if stage=="PEAKING":
-        return"EXPANSION"
-    if stage=="BUILDING":
-        return"ACCUMULATING"
+    if stage=="REVERSING":return"PRE_EXPANSION"
+    if stage=="PEAKING":return"EXPANSION"
+    if stage=="BUILDING":return"ACCUMULATING"
     return"ACCUMULATING"
 
 # ================= TELEGRAM =================
@@ -206,6 +168,8 @@ def send(msg):
 # ================= MAIN =================
 
 def main():
+    load_data()
+
     lag=lag_phase()
     rot=rotation_phase()
     stage=liquidity_stage()
@@ -220,7 +184,7 @@ def main():
         "NONE":"No lag."
     }
 
-    msg=f"""📡 V3.2.2 LIQUIDITY INTELLIGENCE
+    msg=f"""📡 V3.3 LIQUIDITY INTELLIGENCE
 
 API Health: {API_HEALTH}
 
@@ -241,9 +205,7 @@ BTC Dominance: {dominance():.2f}
 Time: {now()}
 """
 
-
     send(msg)
 
 if __name__=="__main__":
     main()
-
