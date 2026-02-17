@@ -5,6 +5,8 @@ BINANCE="https://api.binance.com/api/v3/klines"
 FUTURES="https://fapi.binance.com/fapi/v1/premiumIndex"
 FNG="https://api.alternative.me/fng/"
 COINGECKO="https://api.coingecko.com/api/v3/global"
+API_HEALTH = "OK"
+
 
 TOKEN=os.getenv("TELEGRAM_TOKEN")
 CHAT=os.getenv("TELEGRAM_CHAT_ID")
@@ -21,10 +23,42 @@ def get(url,params=None):
         return None
 
 def klines(sym,tf,lim):
-    return get(BINANCE,{"symbol":sym,"interval":tf,"limit":lim}) or []
+    global API_HEALTH
+    data = get(BINANCE,{"symbol":sym,"interval":tf,"limit":lim})
 
-def closes(k): return [float(x[4]) for x in k]
-def vols(k): return [float(x[5]) for x in k]
+    if isinstance(data,list):
+        return data
+
+    # mark degraded health
+    API_HEALTH = "DEGRADED"
+    return []
+
+
+
+def closes(k):
+    if not isinstance(k,list):
+        return []
+    out=[]
+    for x in k:
+        if isinstance(x,list) and len(x)>4:
+            try:
+                out.append(float(x[4]))
+            except:
+                pass
+    return out
+
+def vols(k):
+    if not isinstance(k,list):
+        return []
+    out=[]
+    for x in k:
+        if isinstance(x,list) and len(x)>5:
+            try:
+                out.append(float(x[5]))
+            except:
+                pass
+    return out
+
 
 # ================= DATA =================
 
@@ -186,7 +220,9 @@ def main():
         "NONE":"No lag."
     }
 
-    msg=f"""📡 V3.2 LIQUIDITY INTELLIGENCE
+    msg=f"""📡 V3.2.2 LIQUIDITY INTELLIGENCE
+
+API Health: {API_HEALTH}
 
 Lag Phase: {lag}
 Liquidity Stage: {stage}
@@ -205,7 +241,9 @@ BTC Dominance: {dominance():.2f}
 Time: {now()}
 """
 
+
     send(msg)
 
 if __name__=="__main__":
     main()
+
