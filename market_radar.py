@@ -51,12 +51,6 @@ def trend(k):
     if c[-1]<c[-5]<c[-10]:return"DOWN"
     return"RANGE"
 
-def vol_ratio(k):
-    v=vols(k)
-    if len(v)<21:return 1
-    avg=sum(v[-21:-1])/20
-    return v[-1]/avg if avg>0 else 1
-
 def pct(c,n):
     if len(c)<n+1:return 0
     return((c[-1]-c[-n-1])/c[-n-1])*100
@@ -90,7 +84,7 @@ def rotation_phase():
     if tr=="UP":return"TRANSITION"
     return"BTC_LED"
 
-# ================= ALT MOMENTUM SCORE =================
+# ================= ALT MOMENTUM =================
 
 def alt_momentum():
     ethbtc=klines("ETHBTC","1d",15)
@@ -110,29 +104,60 @@ def alt_momentum():
 
     return max(0,min(100,score))
 
+# ================= NEW LIQUIDITY STAGE ENGINE =================
+
+def liquidity_stage():
+    d=klines("BTCUSDT","1d",30)
+    fr=fear()
+    f=funding()
+    dom=dominance()
+
+    tr=trend(d)
+
+    # BUILDING = early cycle fear but not trending
+    if fr<35 and tr=="DOWN":
+        return"BUILDING"
+
+    # PEAKING = dominance high + trend up
+    if dom>58 and tr=="UP":
+        return"PEAKING"
+
+    # REVERSING = fear low + dominance falling
+    if fr<30 and dom<56:
+        return"REVERSING"
+
+    # DRAINING = trend down but fear rising
+    if tr=="DOWN" and fr>35:
+        return"DRAINING"
+
+    return"NEUTRAL"
+
 # ================= LIQUIDITY VECTOR =================
 
-def liquidity_vector(lag):
+def liquidity_vector(lag,stage):
     f=funding()
     fr=fear()
 
-    if lag in["MID_LAG","LATE_LAG"] and f<=0 and fr<30:
+    if stage=="REVERSING" and lag in["MID_LAG","LATE_LAG"]:
         return"UPWARD_HUNT"
 
     if lag=="EARLY_LAG":
         return"DOWNWARD_HUNT"
 
-    return"ABSORBING"
+    if fr<30 and f<=0:
+        return"ABSORBING"
+
+    return"NEUTRAL"
 
 # ================= MACRO FLOW =================
 
-def macro_flow():
-    d=klines("BTCUSDT","1d",30)
-    tr=trend(d)
-    dom=dominance()
-
-    if tr=="RANGE" and dom<56:return"PRE_EXPANSION"
-    if tr=="UP":return"EXPANSION"
+def macro_flow(stage):
+    if stage=="REVERSING":
+        return"PRE_EXPANSION"
+    if stage=="PEAKING":
+        return"EXPANSION"
+    if stage=="BUILDING":
+        return"ACCUMULATING"
     return"ACCUMULATING"
 
 # ================= TELEGRAM =================
@@ -149,8 +174,9 @@ def send(msg):
 def main():
     lag=lag_phase()
     rot=rotation_phase()
-    liq=liquidity_vector(lag)
-    macro=macro_flow()
+    stage=liquidity_stage()
+    liq=liquidity_vector(lag,stage)
+    macro=macro_flow(stage)
     alt_score=alt_momentum()
 
     guide={
@@ -160,9 +186,10 @@ def main():
         "NONE":"No lag."
     }
 
-    msg=f"""📡 V3.1 INTELLIGENCE REPORT
+    msg=f"""📡 V3.2 LIQUIDITY INTELLIGENCE
 
 Lag Phase: {lag}
+Liquidity Stage: {stage}
 Rotation Phase: {rot}
 Liquidity Vector: {liq}
 Macro Flow: {macro}
