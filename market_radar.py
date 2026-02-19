@@ -16,15 +16,10 @@ TESTS = {
         "params": None,
         "extract": lambda d: f"Value={d['data'][0]['value']}, Label={d['data'][0]['value_classification']}"
     },
-    "Binance Futures - fundingRate": {
-        "url": "https://fapi.binance.com/fapi/v1/fundingRate",
-        "params": {"symbol": "BTCUSDT", "limit": 1},
-        "extract": lambda d: f"Rate={d[0]['fundingRate']}, Time={d[0]['fundingTime']}"
-    },
-    "Binance Futures - premiumIndex (old)": {
-        "url": "https://fapi.binance.com/fapi/v1/premiumIndex",
-        "params": {"symbol": "BTCUSDT"},
-        "extract": lambda d: f"lastFundingRate={d['lastFundingRate']}"
+    "Coinglass - BTC Funding Rate (replaces Binance)": {
+        "url": "https://open-api.coinglass.com/public/v2/funding",
+        "params": {"symbol": "BTC"},
+        "extract": lambda d: f"Rate={next((e['rate'] for e in d['data'] if e.get('symbol','').upper()=='BTC'), 'NOT FOUND')}"
     },
     "CoinGecko - BTC Global Dominance": {
         "url": "https://api.coingecko.com/api/v3/global",
@@ -118,10 +113,11 @@ def main():
     print("DIAGNOSTIC COMPLETE")
     print("Check each result above for ✅ or ❌")
     print("Common fixes:")
-    print("  429 on CoinGecko  → Add delay between calls (already in V4.0)")
-    print("  403 on Binance    → GitHub Actions IP may be geo-blocked")
-    print("  ConnectionError   → GitHub Actions outbound network restriction")
-    print("  Timeout           → Endpoint is slow, increase timeout")
+    print("  429 on CoinGecko   → Increase delay between calls")
+    print("  451 on Binance     → Geo-blocked — already replaced with Coinglass")
+    print("  403 on Coinglass   → Free tier may need a header or key — check docs")
+    print("  ConnectionError    → GitHub Actions outbound network restriction")
+    print("  Timeout            → Endpoint is slow, increase timeout")
     print("=" * 55)
 
 
