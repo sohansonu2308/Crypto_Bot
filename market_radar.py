@@ -16,10 +16,10 @@ TESTS = {
         "params": None,
         "extract": lambda d: f"Value={d['data'][0]['value']}, Label={d['data'][0]['value_classification']}"
     },
-    "Bybit - BTC Funding Rate (replaces Binance)": {
-        "url": "https://api.bybit.com/v5/market/tickers",
-        "params": {"category": "linear", "symbol": "BTCUSDT"},
-        "extract": lambda d: f"Rate={d['result']['list'][0]['fundingRate']}, Symbol={d['result']['list'][0]['symbol']}"
+    "CoinGecko - BTC Intraday OHLC (funding proxy)": {
+        "url": "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc",
+        "params": {"vs_currency": "usd", "days": "1"},
+        "extract": lambda d: f"Rows={len(d)}, open={d[-1][1]}, close={d[-1][4]}, proxy_rate={((d[-1][4]-d[-1][1])/d[-1][1]):.6f}"
     },
     "CoinGecko - BTC Global Dominance": {
         "url": "https://api.coingecko.com/api/v3/global",
@@ -97,6 +97,7 @@ def main():
     print("=" * 55)
     print("Testing each endpoint individually...")
     print("Note: CoinGecko calls are spaced 8s apart to avoid 429s")
+    print("(Binance=451 geo-blocked, Bybit=403 geo-blocked — funding now derived from CoinGecko)")
 
     results = {}
 
@@ -115,7 +116,7 @@ def main():
     print("Common fixes:")
     print("  429 on CoinGecko   → Increase delay between calls")
     print("  451 on Binance     → Geo-blocked — already replaced with Coinglass")
-    print("  Error on Bybit     → Unlikely — fully public API, check connectivity")
+    print("  Funding proxy      → Derived from CoinGecko intraday — no extra API needed")
     print("  ConnectionError    → GitHub Actions outbound network restriction")
     print("  Timeout            → Endpoint is slow, increase timeout")
     print("=" * 55)
