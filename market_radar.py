@@ -1,441 +1,128 @@
 """
-Liquidity Lag Market Phase Interpreter — V4.0
-Runs every 4 hours via GitHub Actions.
-
-Concept: Price reacts to liquidity changes with a delay (liquidity lag).
-This bot identifies where the market sits in that lag cycle and reports
-the macro phase, rotation, and directional pressure.
+API Diagnostic Script
+Run this once to identify exactly which API is failing and why.
+Usage: python diagnose.py
 """
 
-import os
-import time
 import requests
-from datetime import datetime, timezone
+import json
+import time
 
-# ================= CONFIG =================
+# ================= ENDPOINTS =================
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT   = os.getenv("TELEGRAM_CHAT_ID")
-
-# API Endpoints
-_FNG        = "https://api.alternative.me/fng/"
-_CG_GLOBAL  = "https://api.coingecko.com/api/v3/global"
-_CG_OHLC    = "https://api.coingecko.com/api/v3/coins/{}/ohlc"
-_BFX_FUND   = "https://fapi.binance.com/fapi/v1/fundingRate"  # more reliable than premiumIndex
-
-# CoinGecko coin IDs for symbols we track
-COIN_MAP = {
-    "BTCUSDT": "bitcoin",
-    "ETHUSDT": "ethereum",
+TESTS = {
+    "Fear & Greed": {
+        "url": "https://api.alternative.me/fng/",
+        "params": None,
+        "extract": lambda d: f"Value={d['data'][0]['value']}, Label={d['data'][0]['value_classification']}"
+    },
+    "Binance Futures - fundingRate": {
+        "url": "https://fapi.binance.com/fapi/v1/fundingRate",
+        "params": {"symbol": "BTCUSDT", "limit": 1},
+        "extract": lambda d: f"Rate={d[0]['fundingRate']}, Time={d[0]['fundingTime']}"
+    },
+    "Binance Futures - premiumIndex (old)": {
+        "url": "https://fapi.binance.com/fapi/v1/premiumIndex",
+        "params": {"symbol": "BTCUSDT"},
+        "extract": lambda d: f"lastFundingRate={d['lastFundingRate']}"
+    },
+    "CoinGecko - BTC Global Dominance": {
+        "url": "https://api.coingecko.com/api/v3/global",
+        "params": None,
+        "extract": lambda d: f"BTC Dominance={d['data']['market_cap_percentage']['btc']:.2f}%"
+    },
+    "CoinGecko - BTC OHLC (30d)": {
+        "url": "https://api.coingecko.com/api/v3/coins/bitcoin/ohlc",
+        "params": {"vs_currency": "usd", "days": "30"},
+        "extract": lambda d: f"Rows={len(d)}, Last close={d[-1][4]}"
+    },
+    "CoinGecko - ETH OHLC (30d)": {
+        "url": "https://api.coingecko.com/api/v3/coins/ethereum/ohlc",
+        "params": {"vs_currency": "usd", "days": "30"},
+        "extract": lambda d: f"Rows={len(d)}, Last close={d[-1][4]}"
+    },
 }
 
-# ================= STATE (single-run cache) =================
-# All market data and derived values are computed once per run
-# and stored here, so no API is called more than once.
+# ================= RUNNER =================
 
-_cache = {}   # raw API responses  — keyed by url+params string
-_data  = {}   # processed closes, ratios etc.
-_mkt   = {}   # fear, funding, dominance — fetched once, reused everywhere
+def test_endpoint(name, url, params, extract_fn):
+    print(f"\n{'='*55}")
+    print(f"TEST: {name}")
+    print(f"URL:  {url}")
+    if params:
+        print(f"Params: {params}")
+    print("-" * 55)
 
-API_HEALTH = "OK"   # mutated to DEGRADED if any fetch fails
+    try:
+        r = requests.get(url, params=params, timeout=15)
+        print(f"Status Code : {r.status_code}")
+        print(f"Headers     : {dict(r.headers).get('Content-Type', 'N/A')}")
 
-
-# ================= HTTP LAYER =================
-
-def _fetch(url: str, params: dict = None, retries: int = 3) -> dict | list | None:
-    """
-    Reliable GET with exponential backoff.
-    Handles 429 rate-limit responses explicitly with a longer wait.
-    Returns parsed JSON or None on total failure.
-    """
-    cache_key = url + str(sorted((params or {}).items()))
-    if cache_key in _cache:
-        return _cache[cache_key]
-
-    for attempt in range(retries):
-        try:
-            r = requests.get(url, params=params, timeout=12)
-
-            if r.status_code == 200:
-                result = r.json()
-                _cache[cache_key] = result
-                return result
-
-            if r.status_code == 429:
-                # Rate limited — wait longer before retrying
-                wait = 20 * (attempt + 1)
-                time.sleep(wait)
-                continue
-
-            if r.status_code in (502, 503, 504):
-                # Transient server error — short backoff
-                time.sleep(3 * (attempt + 1))
-                continue
-
-        except requests.exceptions.Timeout:
-            time.sleep(2 * (attempt + 1))
-        except requests.exceptions.RequestException:
-            time.sleep(2 * (attempt + 1))
-
-    return None
-
-
-# ================= OHLC / KLINES =================
-
-def _fetch_ohlc(symbol: str) -> list:
-    """
-    Fetch daily OHLC from CoinGecko.
-    Returns list of [timestamp, open, high, low, close] entries.
-    On failure marks API_HEALTH as DEGRADED and returns [].
-    """
-    global API_HEALTH
-
-    coin = COIN_MAP.get(symbol)
-    if not coin:
-        API_HEALTH = "DEGRADED"
-        return []
-
-    data = _fetch(_CG_OHLC.format(coin), {"vs_currency": "usd", "days": "30"})
-
-    if isinstance(data, list) and len(data) > 0:
-        return data   # each row: [timestamp_ms, open, high, low, close]
-
-    API_HEALTH = "DEGRADED"
-    return []
-
-
-def _closes(ohlc: list) -> list[float]:
-    """Extract close prices from CoinGecko OHLC rows."""
-    out = []
-    for row in ohlc:
-        if isinstance(row, (list, tuple)) and len(row) >= 5:
+        if r.status_code == 200:
             try:
-                out.append(float(row[4]))
-            except (ValueError, TypeError):
-                pass
-    return out
+                data = r.json()
+                extracted = extract_fn(data)
+                print(f"✅ SUCCESS")
+                print(f"Data        : {extracted}")
+            except Exception as e:
+                print(f"⚠️  PARSE ERROR: {e}")
+                print(f"Raw (first 300 chars): {r.text[:300]}")
+
+        elif r.status_code == 429:
+            retry_after = r.headers.get("Retry-After", "unknown")
+            print(f"❌ RATE LIMITED (429)")
+            print(f"Retry-After : {retry_after}s")
+            print(f"Response    : {r.text[:200]}")
+
+        elif r.status_code == 403:
+            print(f"❌ FORBIDDEN (403) — Likely blocked by geo or API key required")
+            print(f"Response    : {r.text[:200]}")
+
+        elif r.status_code in (502, 503):
+            print(f"❌ SERVER ERROR ({r.status_code}) — Temporary, retry later")
+
+        else:
+            print(f"❌ UNEXPECTED STATUS: {r.status_code}")
+            print(f"Response    : {r.text[:200]}")
+
+    except requests.exceptions.Timeout:
+        print(f"❌ TIMEOUT — Server did not respond within 15s")
+
+    except requests.exceptions.ConnectionError as e:
+        print(f"❌ CONNECTION ERROR — {e}")
+        print("   → Likely cause: DNS failure, firewall, or GitHub Actions IP block")
+
+    except Exception as e:
+        print(f"❌ UNEXPECTED ERROR — {e}")
 
-
-# ================= MARKET SIGNALS (fetched once) =================
-
-def _load_market_signals():
-    """
-    Fetch fear, funding rate, and BTC dominance exactly once per run.
-    Results stored in _mkt so engines can read them without extra calls.
-    """
-    global API_HEALTH
-
-    # --- Fear & Greed ---
-    fng = _fetch(_FNG)
-    try:
-        _mkt["fear"] = int(fng["data"][0]["value"])
-    except (TypeError, KeyError, IndexError):
-        _mkt["fear"] = 50
-        API_HEALTH = "DEGRADED"
-
-    # --- Funding Rate (Binance Futures) ---
-    # /fundingRate endpoint returns a list; take the latest entry
-    fund = _fetch(_BFX_FUND, {"symbol": "BTCUSDT", "limit": 1})
-    try:
-        _mkt["funding"] = float(fund[0]["fundingRate"])
-    except (TypeError, KeyError, IndexError):
-        _mkt["funding"] = 0.0
-        API_HEALTH = "DEGRADED"
-
-    # --- BTC Dominance (CoinGecko global) ---
-    cg = _fetch(_CG_GLOBAL)
-    try:
-        _mkt["dominance"] = float(cg["data"]["market_cap_percentage"]["btc"])
-    except (TypeError, KeyError):
-        _mkt["dominance"] = 50.0
-        API_HEALTH = "DEGRADED"
-
-
-# Convenience accessors — read from cache, never re-fetch
-
-def fear()      -> int:   return _mkt.get("fear",      50)
-def funding()   -> float: return _mkt.get("funding",   0.0)
-def dominance() -> float: return _mkt.get("dominance", 50.0)
-
-
-# ================= DATA LOAD =================
-
-def load_data():
-    """
-    Load all OHLC data and derived series once.
-    Pre-compute closes and ETH/BTC ratio so engines don't repeat work.
-    """
-    btc_ohlc = _fetch_ohlc("BTCUSDT")
-    eth_ohlc = _fetch_ohlc("ETHUSDT")
-
-    _data["btc_closes"] = _closes(btc_ohlc)
-    _data["eth_closes"] = _closes(eth_ohlc)
-
-    # ETH/BTC ratio series — computed once, used by rotation + alt momentum
-    btc_c = _data["btc_closes"]
-    eth_c = _data["eth_closes"]
-    pairs  = min(len(btc_c), len(eth_c))
-    _data["ethbtc"] = [
-        eth_c[i] / btc_c[i]
-        for i in range(pairs)
-        if btc_c[i] != 0
-    ]
-
-    _load_market_signals()
-
-
-# ================= TECHNICAL HELPERS =================
-
-def trend_from(series: list[float]) -> str:
-    """
-    Simple 3-point trend detection using closes at index -1, -5, -10.
-    Requires at least 10 data points; returns RANGE otherwise.
-    """
-    if len(series) < 10:
-        return "RANGE"
-    if series[-1] > series[-5] > series[-10]:
-        return "UP"
-    if series[-1] < series[-5] < series[-10]:
-        return "DOWN"
-    return "RANGE"
-
-
-def pct_change(series: list[float], n: int) -> float:
-    """Percentage change of last close vs n candles ago."""
-    if len(series) < n + 1:
-        return 0.0
-    return ((series[-1] - series[-n - 1]) / series[-n - 1]) * 100
-
-
-# ================= ENGINES =================
-
-def lag_phase() -> str:
-    """
-    Where is the market in the liquidity lag cycle?
-
-    Lag only activates when fear ≤ 35 (distress zone).
-    At fear > 35 there is no meaningful lag signal — returns NONE.
-
-    EARLY_LAG  — Panic / damage phase, price still falling hard
-    MID_LAG    — Absorption, price ranging, smart money quietly accumulating
-    LATE_LAG   — Compression before expansion, structure improving
-    LAG_ACTIVE — Fallback: lag present but phase unclear
-    NONE       — No lag signal (market not in fear)
-    """
-    btc    = _data["btc_closes"]
-    tr     = trend_from(btc)
-    fr     = fear()
-    change = pct_change(btc, 5)
-
-    if fr > 35:
-        return "NONE"
-
-    if tr == "DOWN" and change < -6:
-        return "EARLY_LAG"
-
-    if tr == "RANGE":
-        return "MID_LAG"
-
-    if tr == "UP":          # fixed: was unreachable due to duplicate RANGE check
-        return "LATE_LAG"
-
-    return "LAG_ACTIVE"
-
-
-def liquidity_stage() -> str:
-    """
-    Where is the macro liquidity cycle?
-
-    BUILDING   — Liquidity increasing, accumulation zone
-    PEAKING    — Risk-on phase, BTC-led, near a potential top
-    REVERSING  — Liquidity turning while price may still rise (contrarian buy signal)
-    DRAINING   — Late-cycle exhaustion
-    NEUTRAL    — No clear stage
-    """
-    btc = _data["btc_closes"]
-    tr  = trend_from(btc)
-    fr  = fear()
-    dom = dominance()
-
-    if fr < 35 and tr == "DOWN":
-        return "BUILDING"
-
-    if dom > 58 and tr == "UP":
-        return "PEAKING"
-
-    if fr < 30 and dom < 56:        # fixed: removed stray quote mark
-        return "REVERSING"
-
-    if tr == "DOWN" and fr > 35:
-        return "DRAINING"
-
-    return "NEUTRAL"
-
-
-def rotation_phase() -> str:
-    """
-    Where is capital flowing?
-
-    BTC_LED       — Bitcoin leading, alts lagging
-    TRANSITION    — Capital beginning to rotate toward alts
-    ALT_EXPANSION — Stronger broad altcoin movement, dominance falling
-    """
-    ethbtc = _data["ethbtc"]
-    tr     = trend_from(ethbtc)
-    dom    = dominance()
-
-    if tr == "UP" and dom < 55:
-        return "ALT_EXPANSION"
-
-    if tr == "UP":
-        return "TRANSITION"
-
-    return "BTC_LED"
-
-
-def alt_momentum_score() -> int:
-    """
-    0–100 score for strength of altcoin cycle participation.
-    Based on ETH/BTC trend, relative ETH vs BTC performance, and dominance.
-    """
-    ethbtc = _data["ethbtc"]
-    btc    = _data["btc_closes"]
-    eth    = _data["eth_closes"]
-
-    if len(ethbtc) < 10:
-        return 50
-
-    score = 50
-
-    if trend_from(ethbtc) == "UP":
-        score += 15
-
-    if pct_change(eth, 5) > pct_change(btc, 5):
-        score += 15
-
-    dom = dominance()
-    if dom < 55:
-        score += 10
-    if dom > 58:
-        score -= 10
-
-    return max(0, min(100, score))
-
-
-def liquidity_vector(lag: str, stage: str) -> str:
-    """
-    Directional pressure — where large players may be hunting liquidity.
-
-    UPWARD_HUNT   — Smart money hunting stops/liquidity above price
-    DOWNWARD_HUNT — Pressure still to the downside
-    ABSORBING     — Market absorbing sell pressure quietly
-    NEUTRAL       — No clear directional pressure
-    """
-    fr = fear()
-    f  = funding()
-
-    if stage == "REVERSING" and lag in ("MID_LAG", "LATE_LAG"):
-        return "UPWARD_HUNT"
-
-    if lag == "EARLY_LAG":
-        return "DOWNWARD_HUNT"
-
-    if fr < 30 and f <= 0:
-        return "ABSORBING"
-
-    return "NEUTRAL"
-
-
-def macro_flow(stage: str) -> str:
-    """High-level macro flow label derived from liquidity stage."""
-    mapping = {
-        "REVERSING": "PRE_EXPANSION",
-        "PEAKING":   "EXPANSION",
-        "BUILDING":  "ACCUMULATING",
-        "DRAINING":  "LATE_CYCLE",
-    }
-    return mapping.get(stage, "ACCUMULATING")
-
-
-# ================= TELEGRAM =================
-
-def send_telegram(msg: str):
-    """Send message to Telegram. Silently skips if credentials not set."""
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
-        print("[Telegram] Credentials not set — printing to stdout instead.")
-        print(msg)
-        return
-
-    try:
-        resp = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT, "text": msg, "parse_mode": "HTML"},
-            timeout=10,
-        )
-        if resp.status_code != 200:
-            print(f"[Telegram] Failed: {resp.status_code} — {resp.text}")
-    except requests.exceptions.RequestException as e:
-        print(f"[Telegram] Exception: {e}")
-
-
-# ================= GUIDANCE MAP =================
-
-LAG_GUIDANCE = {
-    "EARLY_LAG":  "⛔ No trades. Damage phase still active.",
-    "MID_LAG":    "🟡 Spot accumulation allowed. Monitor structure.",
-    "LATE_LAG":   "🟢 Prepare for expansion. Compression likely ending.",
-    "LAG_ACTIVE": "🔵 Lag detected. Phase unclear — observe.",
-    "NONE":       "⚪ No lag signal. Market not in fear zone.",
-}
-
-
-# ================= MAIN =================
 
 def main():
-    # Step 1: Load all data (one pass, everything cached)
-    load_data()
+    print("=" * 55)
+    print("  LIQUIDITY BOT — API DIAGNOSTIC")
+    print("=" * 55)
+    print("Testing each endpoint individually...")
+    print("Note: CoinGecko calls are spaced 8s apart to avoid 429s")
 
-    # Step 2: Run engines (all read from _data and _mkt — no extra API calls)
-    lag   = lag_phase()
-    stage = liquidity_stage()
-    rot   = rotation_phase()
-    vec   = liquidity_vector(lag, stage)
-    macro = macro_flow(stage)
-    score = alt_momentum_score()
+    results = {}
 
-    # Step 3: Read cached market values for display
-    fr  = fear()
-    f   = funding()
-    dom = dominance()
+    for i, (name, cfg) in enumerate(TESTS.items()):
+        # Space out CoinGecko calls to respect rate limits
+        if i > 0 and "CoinGecko" in name:
+            print(f"\n⏳ Waiting 8s before next CoinGecko call...")
+            time.sleep(8)
 
-    # Step 4: Build report
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        test_endpoint(name, cfg["url"], cfg["params"], cfg["extract"])
+        results[name] = True  # placeholder — read output manually
 
-    msg = (
-        f"<b>📡 LIQUIDITY LAG INTELLIGENCE — V4.0</b>\n"
-        f"<i>{ts}</i>\n"
-        f"━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔧 <b>API Health:</b> {API_HEALTH}\n\n"
-        f"<b>[ CYCLE PHASES ]</b>\n"
-        f"  Lag Phase:        <b>{lag}</b>\n"
-        f"  Liquidity Stage:  <b>{stage}</b>\n"
-        f"  Macro Flow:       <b>{macro}</b>\n\n"
-        f"<b>[ FLOW & ROTATION ]</b>\n"
-        f"  Rotation Phase:   <b>{rot}</b>\n"
-        f"  Liquidity Vector: <b>{vec}</b>\n"
-        f"  Alt Momentum:     <b>{score}/100</b>\n\n"
-        f"<b>[ RAW SIGNALS ]</b>\n"
-        f"  Fear & Greed:     {fr}/100\n"
-        f"  Funding Rate:     {f:.4f}\n"
-        f"  BTC Dominance:    {dom:.2f}%\n\n"
-        f"<b>[ GUIDANCE ]</b>\n"
-        f"  {LAG_GUIDANCE.get(lag, 'No guidance available.')}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━"
-    )
-
-    # Step 5: Send
-    send_telegram(msg)
-    print(msg)   # also print for GitHub Actions logs
+    print(f"\n{'='*55}")
+    print("DIAGNOSTIC COMPLETE")
+    print("Check each result above for ✅ or ❌")
+    print("Common fixes:")
+    print("  429 on CoinGecko  → Add delay between calls (already in V4.0)")
+    print("  403 on Binance    → GitHub Actions IP may be geo-blocked")
+    print("  ConnectionError   → GitHub Actions outbound network restriction")
+    print("  Timeout           → Endpoint is slow, increase timeout")
+    print("=" * 55)
 
 
 if __name__ == "__main__":
