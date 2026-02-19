@@ -16,10 +16,10 @@ TESTS = {
         "params": None,
         "extract": lambda d: f"Value={d['data'][0]['value']}, Label={d['data'][0]['value_classification']}"
     },
-    "Coinglass - BTC Funding Rate (replaces Binance)": {
-        "url": "https://open-api.coinglass.com/public/v2/funding",
-        "params": {"symbol": "BTC"},
-        "extract": lambda d: f"Rate={next((e['rate'] for e in d['data'] if e.get('symbol','').upper()=='BTC'), 'NOT FOUND')}"
+    "Bybit - BTC Funding Rate (replaces Binance)": {
+        "url": "https://api.bybit.com/v5/market/tickers",
+        "params": {"category": "linear", "symbol": "BTCUSDT"},
+        "extract": lambda d: f"Rate={d['result']['list'][0]['fundingRate']}, Symbol={d['result']['list'][0]['symbol']}"
     },
     "CoinGecko - BTC Global Dominance": {
         "url": "https://api.coingecko.com/api/v3/global",
@@ -115,7 +115,7 @@ def main():
     print("Common fixes:")
     print("  429 on CoinGecko   → Increase delay between calls")
     print("  451 on Binance     → Geo-blocked — already replaced with Coinglass")
-    print("  403 on Coinglass   → Free tier may need a header or key — check docs")
+    print("  Error on Bybit     → Unlikely — fully public API, check connectivity")
     print("  ConnectionError    → GitHub Actions outbound network restriction")
     print("  Timeout            → Endpoint is slow, increase timeout")
     print("=" * 55)
