@@ -1,5 +1,5 @@
 """
-Liquidity Lag Market Phase Interpreter — V4.1
+Liquidity Lag Market Phase Interpreter — V4.2
 Runs every 4 hours via GitHub Actions.
 
 Concept: Price reacts to liquidity changes with a delay (liquidity lag).
@@ -222,6 +222,24 @@ def pct_change(series: list[float], n: int) -> float:
     return ((series[-1] - series[-n - 1]) / series[-n - 1]) * 100
 
 
+def days_since_btc_peak(n: int = 30) -> int:
+    """
+    Count how many 4h candles (CoinGecko granularity) have passed since
+    BTC made its highest close in the last n closes.
+    Used to detect the BTC→ALT rotation window (2–7 days after BTC peaks).
+    Returns -1 if data is insufficient.
+    """
+    closes = _data["btc_closes"]
+    if len(closes) < n:
+        return -1
+    window    = closes[-n:]
+    peak_idx  = window.index(max(window))          # index of peak within window
+    candles_since = (n - 1) - peak_idx             # candles since peak
+    # CoinGecko 30d OHLC returns ~6 candles/day (4h each)
+    days = round(candles_since / 6)
+    return days
+
+
 # ================= ENGINES =================
 
 def lag_phase() -> str:
@@ -275,7 +293,9 @@ def liquidity_stage() -> str:
     if fr < 35 and tr == "DOWN":
         return "BUILDING"
 
-    if dom > 58 and tr == "UP":
+    if (dom > 58 or fr >= 70) and tr == "UP":
+        # D Man: "last stages of liquidity = major sign of bull market"
+        # High greed (retail euphoria) OR high dominance while price rising = distribution risk
         return "PEAKING"
 
     if fr < 30 and dom < 56:        # fixed: removed stray quote mark
@@ -291,13 +311,23 @@ def rotation_phase() -> str:
     """
     Where is capital flowing?
 
-    BTC_LED       — Bitcoin leading, alts lagging
-    TRANSITION    — Capital beginning to rotate toward alts
-    ALT_EXPANSION — Stronger broad altcoin movement, dominance falling
+    D Man: "When BTC has peaked, last two days or a week — alts peak."
+    We now detect how many days since BTC's local peak and use that to
+    identify the rotation window precisely.
+
+    BTC_LED         — Bitcoin leading, alts lagging
+    ALT_WINDOW_OPEN — BTC peaked 2–7 days ago — alt rotation window is open
+    TRANSITION      — ETH/BTC trending up, capital beginning to rotate
+    ALT_EXPANSION   — Full altcoin expansion, dominance falling below 55
     """
     ethbtc = _data["ethbtc"]
     tr     = trend_from(ethbtc)
     dom    = dominance()
+    days   = days_since_btc_peak()
+
+    # Primary: D Man's timing rule — 2 to 7 days after BTC peaks, alts follow
+    if 2 <= days <= 7:
+        return "ALT_WINDOW_OPEN"
 
     if tr == "UP" and dom < 55:
         return "ALT_EXPANSION"
@@ -361,6 +391,23 @@ def liquidity_vector(lag: str, stage: str) -> str:
     return "NEUTRAL"
 
 
+def high_conviction_setup(lag: str, stage: str, rot: str) -> str:
+    """
+    D Man's highest conviction setup:
+    REVERSING stage + LATE_LAG phase = liquidity turning while price
+    still has room to run. This is the core contrarian bull signal.
+    Also flags the alt rotation window when BTC has peaked.
+    Returns a special label or empty string if no setup detected.
+    """
+    if stage == "REVERSING" and lag == "LATE_LAG":
+        return "⚡ PRIME SETUP: Liquidity reversing + compression ending — expansion imminent"
+    if stage == "REVERSING" and lag == "MID_LAG":
+        return "🔥 HIGH CONVICTION: Liquidity reversing + absorption phase — accumulate"
+    if rot == "ALT_WINDOW_OPEN":
+        return "🔄 ALT ROTATION WINDOW: BTC peaked 2–7 days ago — watch alts"
+    return ""
+
+
 def macro_flow(stage: str) -> str:
     """High-level macro flow label derived from liquidity stage."""
     mapping = {
@@ -411,12 +458,14 @@ def main():
     load_data()
 
     # Step 2: Run engines (all read from _data and _mkt — no extra API calls)
-    lag   = lag_phase()
-    stage = liquidity_stage()
-    rot   = rotation_phase()
-    vec   = liquidity_vector(lag, stage)
-    macro = macro_flow(stage)
-    score = alt_momentum_score()
+    lag    = lag_phase()
+    stage  = liquidity_stage()
+    rot    = rotation_phase()
+    vec    = liquidity_vector(lag, stage)
+    macro  = macro_flow(stage)
+    score  = alt_momentum_score()
+    combo  = high_conviction_setup(lag, stage, rot)
+    d_peak = days_since_btc_peak()
 
     # Step 3: Read cached market values for display
     fr  = fear()
@@ -427,7 +476,7 @@ def main():
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     msg = (
-        f"<b>📡 LIQUIDITY LAG INTELLIGENCE — V4.1</b>\n"
+        f"<b>📡 LIQUIDITY LAG INTELLIGENCE — V4.2</b>\n"
         f"<i>{ts}</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔧 <b>API Health:</b> {API_HEALTH}\n\n"
@@ -436,7 +485,7 @@ def main():
         f"  Liquidity Stage:  <b>{stage}</b>\n"
         f"  Macro Flow:       <b>{macro}</b>\n\n"
         f"<b>[ FLOW & ROTATION ]</b>\n"
-        f"  Rotation Phase:   <b>{rot}</b>\n"
+        f"  Rotation Phase:   <b>{rot}</b> (BTC peak: {d_peak}d ago)\n"
         f"  Liquidity Vector: <b>{vec}</b>\n"
         f"  Alt Momentum:     <b>{score}/100</b>\n\n"
         f"<b>[ RAW SIGNALS ]</b>\n"
@@ -445,7 +494,9 @@ def main():
         f"  BTC Dominance:    {dom:.2f}%\n\n"
         f"<b>[ GUIDANCE ]</b>\n"
         f"  {LAG_GUIDANCE.get(lag, 'No guidance available.')}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━"
+        f"  Days since BTC peak: <b>{d_peak}d</b>\n"
+        + (f"\n<b>[ ⚡ SIGNAL ]</b>\n  {combo}\n" if combo else "")
+        + "━━━━━━━━━━━━━━━━━━━━━"
     )
 
     # Step 5: Send
