@@ -1,5 +1,5 @@
 """
-Liquidity Lag Market Phase Interpreter — V4.2
+Liquidity Lag Market Phase Interpreter — V4.4
 Runs every 4 hours via GitHub Actions.
 
 Concept: Price reacts to liquidity changes with a delay (liquidity lag).
@@ -312,21 +312,37 @@ def rotation_phase() -> str:
     Where is capital flowing?
 
     D Man: "When BTC has peaked, last two days or a week — alts peak."
-    We now detect how many days since BTC's local peak and use that to
-    identify the rotation window precisely.
+    BUT this only applies during bull expansion — NOT during macro downtrends.
 
-    BTC_LED         — Bitcoin leading, alts lagging
-    ALT_WINDOW_OPEN — BTC peaked 2–7 days ago — alt rotation window is open
-    TRANSITION      — ETH/BTC trending up, capital beginning to rotate
-    ALT_EXPANSION   — Full altcoin expansion, dominance falling below 55
+    ALT_WINDOW_OPEN requires ALL THREE conditions to be true:
+      1. BTC peaked 2–7 days ago (timing)
+      2. ETH/BTC ratio holding or rising (alts not bleeding vs BTC)
+      3. BTC dominance flat or falling (capital actually rotating out)
+
+    If dominance is rising and ETH/BTC is falling, alts are just
+    following BTC down — that is NOT a rotation, that is a correlated dump.
+
+    BTC_LED         — Bitcoin leading, alts lagging or falling with BTC
+    ALT_WINDOW_OPEN — All 3 conditions met — genuine alt rotation window
+    TRANSITION      — ETH/BTC trending up, early rotation signs
+    ALT_EXPANSION   — Full altcoin expansion, dominance below 55
     """
     ethbtc = _data["ethbtc"]
     tr     = trend_from(ethbtc)
     dom    = dominance()
     days   = days_since_btc_peak()
 
-    # Primary: D Man's timing rule — 2 to 7 days after BTC peaks, alts follow
-    if 2 <= days <= 7:
+    # Check if ETH/BTC is holding or improving (alts not bleeding vs BTC)
+    ethbtc_holding = pct_change(ethbtc, 3) >= 0  # ETH/BTC flat or up over last 3 candles
+
+    # Check if dominance is flat or falling (capital rotating away from BTC)
+    # We approximate this by checking if current dominance < recent dominance
+    # Using the closes of BTC dominance is not available, so we use a soft threshold:
+    # dominance below 57 = not in full BTC dominance surge mode
+    dom_not_surging = dom < 57
+
+    # D Man's timing rule — only fires if alts are genuinely responding
+    if 2 <= days <= 7 and ethbtc_holding and dom_not_surging:
         return "ALT_WINDOW_OPEN"
 
     if tr == "UP" and dom < 55:
@@ -397,14 +413,29 @@ def high_conviction_setup(lag: str, stage: str, rot: str) -> str:
     REVERSING stage + LATE_LAG phase = liquidity turning while price
     still has room to run. This is the core contrarian bull signal.
     Also flags the alt rotation window when BTC has peaked.
+
+    D Man asset hierarchy (from his positioning message):
+    PRIMARY  — ETH + ERC chain alts (surviving alts with real ecosystems)
+    BASE     — BTC
+    SECONDARY — SOL, Hyperliquid
+
     Returns a special label or empty string if no setup detected.
     """
     if stage == "REVERSING" and lag == "LATE_LAG":
-        return "⚡ PRIME SETUP: Liquidity reversing + compression ending — expansion imminent"
+        return (
+            "⚡ PRIME SETUP: Liquidity reversing + compression ending\n"
+            "   Focus: ETH + ERC alts (primary) → SOL, HYPE (secondary) → BTC (base)"
+        )
     if stage == "REVERSING" and lag == "MID_LAG":
-        return "🔥 HIGH CONVICTION: Liquidity reversing + absorption phase — accumulate"
+        return (
+            "🔥 HIGH CONVICTION: Liquidity reversing + absorption phase\n"
+            "   Action: Accumulate ETH + surviving ERC alts. BTC as base."
+        )
     if rot == "ALT_WINDOW_OPEN":
-        return "🔄 ALT ROTATION WINDOW: BTC peaked 2–7 days ago — watch alts"
+        return (
+            "🔄 ALT ROTATION WINDOW: BTC peaked 2–7 days ago\n"
+            "   Watch: ETH/ERC alts first, then SOL + Hyperliquid"
+        )
     return ""
 
 
@@ -443,11 +474,11 @@ def send_telegram(msg: str):
 # ================= GUIDANCE MAP =================
 
 LAG_GUIDANCE = {
-    "EARLY_LAG":  "⛔ No trades. Damage phase still active.",
-    "MID_LAG":    "🟡 Spot accumulation allowed. Monitor structure.",
-    "LATE_LAG":   "🟢 Prepare for expansion. Compression likely ending.",
-    "LAG_ACTIVE": "🔵 Lag detected. Phase unclear — observe.",
-    "NONE":       "⚪ No lag signal. Market not in fear zone.",
+    "EARLY_LAG":  "⛔ No trades. Damage phase active. Wait for structure.",
+    "MID_LAG":    "🟡 Accumulate spot. Focus: ETH + surviving ERC alts. No leverage.",
+    "LATE_LAG":   "🟢 Prepare for expansion. ETH/ERC primary. SOL/HYPE secondary. BTC base.",
+    "LAG_ACTIVE": "🔵 Lag detected. Phase unclear — observe ETH/BTC ratio for direction.",
+    "NONE":       "⚪ No lag signal. Market not in fear zone. Monitor for re-entry.",
 }
 
 
@@ -471,12 +502,15 @@ def main():
     fr  = fear()
     f   = funding()
     dom = dominance()
+    # ETH/BTC 5-candle change — D Man's primary rotation indicator
+    ethbtc     = _data.get("ethbtc", [])
+    ethbtc_chg = pct_change(ethbtc, 5) if len(ethbtc) >= 6 else 0.0
 
     # Step 4: Build report
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     msg = (
-        f"<b>📡 LIQUIDITY LAG INTELLIGENCE — V4.2</b>\n"
+        f"<b>📡 LIQUIDITY LAG INTELLIGENCE — V4.4</b>\n"
         f"<i>{ts}</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔧 <b>API Health:</b> {API_HEALTH}\n\n"
@@ -491,7 +525,8 @@ def main():
         f"<b>[ RAW SIGNALS ]</b>\n"
         f"  Fear & Greed:     {fr}/100\n"
         f"  Funding Rate:     {f:.4f}\n"
-        f"  BTC Dominance:    {dom:.2f}%\n\n"
+        f"  BTC Dominance:    {dom:.2f}%\n"
+        f"  ETH/BTC 5d Change: {ethbtc_chg:+.2f}%\n\n"
         f"<b>[ GUIDANCE ]</b>\n"
         f"  {LAG_GUIDANCE.get(lag, 'No guidance available.')}\n"
         f"  Days since BTC peak: <b>{d_peak}d</b>\n"
