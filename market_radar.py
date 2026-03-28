@@ -1,5 +1,5 @@
 """
-Liquidity Lag Market Phase Interpreter — V4.4
+Liquidity Lag Market Phase Interpreter — V4.7
 Runs every 4 hours via GitHub Actions.
 
 Concept: Price reacts to liquidity changes with a delay (liquidity lag).
@@ -10,6 +10,7 @@ the macro phase, rotation, and directional pressure.
 import os
 import time
 import requests
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 
 # ================= CONFIG =================
@@ -21,6 +22,33 @@ TELEGRAM_CHAT   = os.getenv("TELEGRAM_CHAT_ID")
 _FNG            = "https://api.alternative.me/fng/"
 _CG_GLOBAL      = "https://api.coingecko.com/api/v3/global"
 _CG_OHLC        = "https://api.coingecko.com/api/v3/coins/{}/ohlc"
+_OIL_FEED       = "https://query1.finance.yahoo.com/v8/finance/chart/CL=F"
+_SPX_FEED       = "https://query1.finance.yahoo.com/v8/finance/chart/%5EGSPC"
+
+# RSS feeds — no API key needed, no geo-blocks
+# Using crypto-native sources that cover geopolitical + macro events
+# and are accessible globally without geo-restrictions
+_RSS_FEEDS = [
+    # CoinTelegraph — covers war, sanctions, Fed, regulations affecting crypto
+    "https://cointelegraph.com/rss",
+    # CryptoPanic — aggregates macro + geopolitical news impacting markets
+    "https://cryptopanic.com/news/rss/",
+    # CoinDesk — Fed, rates, institutional macro
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+]
+
+# Keywords that trigger a risk alert
+# War/conflict triggers
+_WAR_KEYWORDS = [
+    "war", "attack", "strike", "missile", "invasion", "conflict",
+    "military", "bomb", "airstrike", "sanction", "nuclear",
+    "iran", "russia", "ukraine", "israel", "hamas", "nato",
+]
+# Fed/rates triggers
+_FED_KEYWORDS = [
+    "fed", "federal reserve", "interest rate", "rate hike", "rate cut",
+    "fomc", "powell", "inflation", "cpi", "recession", "gdp",
+]
 
 # CoinGecko coin IDs for symbols we track
 COIN_MAP = {
@@ -165,12 +193,38 @@ def _load_market_signals():
         _mkt["dominance"] = 50.0
         API_HEALTH = "DEGRADED"
 
+    # --- Oil Price WTI (D Man war progress bar) ---
+    try:
+        oil_raw = _fetch(_OIL_FEED, {"interval": "1d", "range": "2d"})
+        oil_cls = oil_raw["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        oil_cls = [c for c in oil_cls if c is not None]
+        if len(oil_cls) >= 2:
+            _mkt["oil_price"]   = round(float(oil_cls[-1]), 2)
+            _mkt["oil_chg_pct"] = round(((oil_cls[-1] - oil_cls[-2]) / oil_cls[-2]) * 100, 2)
+        else:
+            _mkt["oil_price"] = _mkt["oil_chg_pct"] = 0.0
+    except Exception:
+        _mkt["oil_price"] = _mkt["oil_chg_pct"] = 0.0
+        print("[WARNING] Oil price unavailable")
+
+    # --- SPX closes (BTC/SPX correlation — D Man: same liquidity drivers) ---
+    try:
+        spx_raw = _fetch(_SPX_FEED, {"interval": "1d", "range": "30d"})
+        spx_cls = spx_raw["chart"]["result"][0]["indicators"]["quote"][0]["close"]
+        _mkt["spx_closes"] = [c for c in spx_cls if c is not None]
+    except Exception:
+        _mkt["spx_closes"] = []
+        print("[WARNING] SPX data unavailable")
+
 
 # Convenience accessors — read from cache, never re-fetch
 
-def fear()      -> int:   return _mkt.get("fear",      50)
-def funding()   -> float: return _mkt.get("funding",   0.0)  # proxy: intraday BTC open/close spread
-def dominance() -> float: return _mkt.get("dominance", 50.0)
+def fear()       -> int:   return _mkt.get("fear",        50)
+def funding()    -> float: return _mkt.get("funding",     0.0)
+def dominance()  -> float: return _mkt.get("dominance",   50.0)
+def oil_price()  -> float: return _mkt.get("oil_price",   0.0)
+def oil_chg()    -> float: return _mkt.get("oil_chg_pct", 0.0)
+def spx_closes() -> list:  return _mkt.get("spx_closes",  [])
 
 
 # ================= DATA LOAD =================
@@ -298,8 +352,14 @@ def liquidity_stage() -> str:
         # High greed (retail euphoria) OR high dominance while price rising = distribution risk
         return "PEAKING"
 
-    if fr < 30 and dom < 56:        # fixed: removed stray quote mark
+    # D Man: oil above $95 = Fed trapped = suppress bull signals
+    oil_high = oil_price() > 95 and oil_price() > 0
+
+    if fr < 30 and dom < 56 and not oil_high:
         return "REVERSING"
+
+    if fr < 30 and dom < 56 and oil_high:
+        return "DRAINING"  # oil override — war suppressing liquidity recovery
 
     if tr == "DOWN" and fr > 35:
         return "DRAINING"
@@ -450,6 +510,354 @@ def macro_flow(stage: str) -> str:
     return mapping.get(stage, "ACCUMULATING")
 
 
+# ================= OIL PROGRESS BAR =================
+
+def oil_progress_bar() -> str:
+    """D Man: Oil price is the war progress bar."""
+    price = oil_price()
+    chg   = oil_chg()
+    if price == 0.0:
+        return "N/A"
+    if price < 75:
+        label = "WAR RESOLVED — Bull signal zone"
+        icon  = "🟢"
+    elif price < 85:
+        label = "DE-ESCALATING — Watch for D Man bull flip"
+        icon  = "🟡"
+    elif price < 95:
+        label = "STALEMATE — No resolution yet"
+        icon  = "🟠"
+    elif price < 110:
+        label = "ESCALATING — Iran pressure active"
+        icon  = "🔴"
+    else:
+        label = "MAXIMUM PAIN — Hormuz severely disrupted"
+        icon  = "🚨"
+    return f"{icon} ${price} ({chg:+.1f}% today) — {label}"
+
+
+# ================= BTC/SPX CORRELATION =================
+
+def btc_spx_correlation() -> dict:
+    """
+    D Man: BTC and SPX share same liquidity drivers.
+    BTC may now be LEADING stocks — use as early warning signal.
+    """
+    btc = _data.get("btc_closes", [])
+    spx = spx_closes()
+    if len(btc) < 10 or len(spx) < 10:
+        return {"correlation": 0.0, "label": "Insufficient data"}
+    n = 10
+    b = btc[-n:]
+    s = spx[-n:]
+    b_mean = sum(b) / n
+    s_mean = sum(s) / n
+    num = sum((b[i] - b_mean) * (s[i] - s_mean) for i in range(n))
+    den = (sum((b[i] - b_mean)**2 for i in range(n)) *
+           sum((s[i] - s_mean)**2 for i in range(n))) ** 0.5
+    corr = round(num / den, 2) if den != 0 else 0.0
+    btc_3d = pct_change(btc, 3)
+    spx_3d = pct_change(spx, 3) if len(spx) >= 4 else 0.0
+    corr_pct = int(abs(corr) * 100)
+    if abs(btc_3d) > abs(spx_3d) and btc_3d * spx_3d > 0:
+        label = f"BTC LEADING SPX ({corr_pct}% corr) — BTC moves first"
+    elif abs(spx_3d) > abs(btc_3d) and btc_3d * spx_3d > 0:
+        label = f"BTC LAGGING SPX ({corr_pct}% corr) — stocks move first"
+    elif corr > 0.7:
+        label = f"BTC SYNCED with SPX ({corr_pct}% corr) — moving together"
+    elif corr < 0.3:
+        label = f"BTC DECOUPLING from SPX ({corr_pct}% corr) — temporary"
+    else:
+        label = f"BTC/SPX MIXED ({corr_pct}% corr)"
+    return {"correlation": corr, "label": label}
+
+
+# ================= WHALE ACCUMULATION SIGNAL =================
+
+def whale_accumulation() -> str:
+    """
+    D Man: Whales accumulate predictably during retail panic.
+    Three convergent signals = whale accumulation active.
+    """
+    fr     = fear()
+    ethbtc = _data.get("ethbtc", [])
+    dom    = dominance()
+    signals = 0
+    details = []
+    if fr <= 20:
+        signals += 1
+        details.append(f"Fear {fr} — retail capitulating")
+    if len(ethbtc) >= 6:
+        chg = pct_change(ethbtc, 5)
+        if chg >= -1.0:
+            signals += 1
+            details.append(f"ETH/BTC holding ({chg:+.1f}%)")
+    if dom < 60:
+        signals += 1
+        details.append(f"Dom {dom:.1f}% — capital not fleeing alts")
+    if signals == 3:
+        return "🐋 WHALE ACCUMULATION: All 3 signals — " + " | ".join(details)
+    elif signals == 2:
+        return "👀 ACCUMULATION WATCH: 2/3 signals — " + " | ".join(details)
+    return ""
+
+
+# ================= ETH ECOSYSTEM MONITOR =================
+
+def eth_ecosystem_signal() -> str:
+    """
+    D Man + Shitcap + Technical analyst all independently called
+    ETH ecosystem as the primary expansion target.
+    """
+    ethbtc = _data.get("ethbtc", [])
+    btc    = _data.get("btc_closes", [])
+    eth    = _data.get("eth_closes", [])
+    if len(ethbtc) < 10 or len(btc) < 6 or len(eth) < 6:
+        return ""
+    eth_vs_btc = pct_change(ethbtc, 5)
+    tr         = trend_from(ethbtc)
+    dom        = dominance()
+    if tr == "UP" and eth_vs_btc > 0 and dom < 57:
+        return (f"💎 ETH ECOSYSTEM STRONG: ETH/BTC trending up "
+                f"({eth_vs_btc:+.1f}%) — primary expansion target activating")
+    if eth_vs_btc >= -2.0 and pct_change(eth, 5) >= pct_change(btc, 5):
+        return (f"📈 ETH HOLDING: ETH/BTC {eth_vs_btc:+.1f}% — "
+                f"institutional base building quietly")
+    return ""
+
+
+# ================= GEOPOLITICAL RISK MONITOR =================
+
+def _parse_rss(url: str) -> list[dict]:
+    """
+    Fetch and parse an RSS feed.
+    Returns list of {title, summary} dicts for recent items.
+    Uses raw requests so it goes through our existing _fetch retry logic.
+    """
+    try:
+        r = requests.get(url, timeout=12, headers={"User-Agent": "Mozilla/5.0"})
+        if r.status_code != 200:
+            return []
+        root = ET.fromstring(r.content)
+        items = []
+        for item in root.iter("item"):
+            title = item.findtext("title") or ""
+            desc  = item.findtext("description") or ""
+            items.append({"title": title.strip(), "summary": desc.strip()})
+            if len(items) >= 20:   # only check last 20 headlines per feed
+                break
+        return items
+    except Exception:
+        return []
+
+
+def geo_risk_monitor() -> list[dict]:
+    """
+    Scan RSS feeds for war/conflict and Fed/rates headlines.
+    Only returns items that match risk keywords — silent otherwise.
+
+    Each returned item: {title, category}
+    category = "⚔️ WAR/CONFLICT" or "🏦 FED/RATES"
+    """
+    alerts = []
+    seen   = set()   # deduplicate across feeds
+
+    for feed_url in _RSS_FEEDS:
+        items = _parse_rss(feed_url)
+        for item in items:
+            title_lower = item["title"].lower()
+
+            # Skip duplicates
+            if title_lower in seen:
+                continue
+            seen.add(title_lower)
+
+            # Check war keywords
+            if any(kw in title_lower for kw in _WAR_KEYWORDS):
+                alerts.append({
+                    "title":    item["title"],
+                    "category": "⚔️ WAR/CONFLICT"
+                })
+                continue
+
+            # Check Fed keywords
+            if any(kw in title_lower for kw in _FED_KEYWORDS):
+                alerts.append({
+                    "title":    item["title"],
+                    "category": "🏦 FED/RATES"
+                })
+
+    # Cap at 5 most relevant alerts to keep message clean
+    return alerts[:5]
+
+
+# ================= BOTTOM DETECTOR =================
+
+def bottom_detector() -> str:
+    """
+    Rothschild framework: detect when the crash bottom is likely in.
+    D Man: "Immediate after" phase — the long entry after the short plays out.
+    Arcanum: "Bargain Area / Lifetime Opportunity Area"
+
+    Bottom forms when multiple signals converge simultaneously:
+    1. Fear extreme (≤15) — retail fully capitulated
+    2. BTC structure holding — no new lows forming
+    3. Whale accumulation active — institutions buying quietly
+    4. Oil stabilising or falling — war pressure easing
+    5. Funding proxy negative — shorts dominant = squeeze fuel loaded
+
+    Scoring: 5 signals = PRIME BOTTOM, 4 = LIKELY BOTTOM, 3 = WATCH
+    Silent below 3 signals.
+    """
+    fr      = fear()
+    btc     = _data.get("btc_closes", [])
+    f_rate  = funding()
+    oil     = oil_price()
+    oil_chg_val = oil_chg()
+    ethbtc  = _data.get("ethbtc", [])
+    dom     = dominance()
+
+    score   = 0
+    details = []
+
+    # Signal 1: Fear extreme — retail fully capitulated
+    if fr <= 15:
+        score += 1
+        details.append(f"Fear {fr} — full capitulation")
+
+    # Signal 2: BTC structure holding — last candle not making new lows
+    if len(btc) >= 6:
+        recent_low  = min(btc[-5:])
+        current     = btc[-1]
+        if current >= recent_low * 0.99:  # within 1% of recent low = holding
+            score += 1
+            details.append("BTC holding structure")
+
+    # Signal 3: Whale accumulation — 2+ signals active
+    whale_signals = 0
+    if fr <= 20:
+        whale_signals += 1
+    if len(ethbtc) >= 6 and pct_change(ethbtc, 5) >= -1.0:
+        whale_signals += 1
+    if dom < 60:
+        whale_signals += 1
+    if whale_signals >= 2:
+        score += 1
+        details.append(f"Whale signals {whale_signals}/3 active")
+
+    # Signal 4: Oil stabilising or falling — war pressure easing
+    if oil > 0 and oil_chg_val <= 0:
+        score += 1
+        details.append(f"Oil stabilising (${oil} {oil_chg_val:+.1f}%)")
+
+    # Signal 5: Funding negative — shorts loaded = short squeeze fuel
+    if f_rate <= 0:
+        score += 1
+        details.append("Funding negative — squeeze fuel ready")
+
+    # Return signal based on score
+    sig_str = " | ".join(details)
+    if score >= 5:
+        return (
+            "🎯 PRIME BOTTOM: All 5 signals active\n"
+            f"   {sig_str}\n"
+            "   D Man's IMMEDIATE AFTER phase — Arcanum's BARGAIN AREA\n"
+            "   Deploy: ETH primary, SOL secondary, ERC alts follow"
+        )
+    elif score >= 4:
+        return (
+            "🟢 LIKELY BOTTOM: 4/5 signals active\n"
+            f"   {sig_str}\n"
+            "   Prepare positions. Wait for 5th signal before full deploy."
+        )
+    elif score >= 3:
+        return (
+            "👀 BOTTOM WATCH: 3/5 signals active\n"
+            f"   {sig_str}\n"
+            "   Not yet. Monitor closely next 4h run."
+        )
+    return ""
+
+
+# ================= NARRATIVE vs REALITY FILTER =================
+
+def narrative_vs_reality() -> str:
+    """
+    Rothschild framework: detect when official narratives diverge from
+    what oil price and market structure actually say.
+
+    D Man: "The only talk they will have is with fists and weapons."
+    Shitcap: "You will see what they want you to see."
+
+    Three divergence patterns to detect:
+
+    FAKE PEACE — Peace narrative + oil still high
+    Price pumps on ceasefire/talks headlines but oil unchanged above $95
+    = Whales de-risking into retail buying the narrative
+    = Manipulation pump, not real resolution
+
+    REAL BOTTOM — Crash narrative + whale accumulation active
+    Mainstream says panic/crisis but smart money is quietly accumulating
+    = Actual bottom formation regardless of headline fear
+
+    MANIPULATION PUMP — BTC pumping + fear still extreme + oil unchanged
+    Price moved up significantly but underlying conditions unchanged
+    = Short opportunity (D Man: "any up move I'll look to short")
+
+    Silent when no divergence detected — only fires on real signals.
+    """
+    fr          = fear()
+    oil         = oil_price()
+    oil_c       = oil_chg()
+    btc         = _data.get("btc_closes", [])
+    ethbtc      = _data.get("ethbtc", [])
+    dom         = dominance()
+
+    # BTC short term pump — 3 candle change
+    btc_3d_chg  = pct_change(btc, 3) if len(btc) >= 4 else 0.0
+
+    # Whale accumulation check
+    whale_count = 0
+    if fr <= 20:              whale_count += 1
+    if len(ethbtc) >= 6 and pct_change(ethbtc, 5) >= -1.0: whale_count += 1
+    if dom < 60:              whale_count += 1
+
+    alerts = []
+
+    # Pattern 1: FAKE PEACE SIGNAL
+    # RSS has peace/ceasefire keywords AND oil still above $95
+    # BTC pumped 3%+ but oil unchanged = narrative not confirmed by reality
+    if oil > 95 and btc_3d_chg > 3.0:
+        alerts.append(
+            f"⚠️ FAKE PEACE SIGNAL DETECTED\n"
+            f"   BTC pumped {btc_3d_chg:+.1f}% but oil at ${oil} — war still ongoing\n"
+            f"   Rothschild rule: official narrative != oil reality\n"
+            f"   Do NOT chase this pump. Whales are distributing."
+        )
+
+    # Pattern 2: REAL BOTTOM
+    if fr <= 15 and whale_count >= 2 and oil > 0 and oil_c <= 1.0:
+        alerts.append(
+            f"✅ REALITY CONFIRMS BOTTOM\n"
+            f"   Fear {fr} + {whale_count}/3 whale signals + oil stabilising\n"
+            f"   Narrative says panic. Reality says accumulation.\n"
+            f"   This is Arcanum's Bargain Area forming."
+        )
+
+    # Pattern 3: MANIPULATION PUMP
+    if btc_3d_chg > 5.0 and fr <= 25 and oil > 90:
+        alerts.append(
+            f"🚨 MANIPULATION PUMP DETECTED\n"
+            f"   BTC +{btc_3d_chg:.1f}% but Fear={fr}, Oil=${oil}\n"
+            f"   D Man: Any up move I will look to SHORT\n"
+            f"   Whales de-risking. Do not buy this move."
+        )
+
+    if alerts:
+        return "\n".join(alerts)
+    return ""
+
+
 # ================= TELEGRAM =================
 
 def send_telegram(msg: str):
@@ -488,7 +896,14 @@ def main():
     # Step 1: Load all data (one pass, everything cached)
     load_data()
 
-    # Step 2: Run engines (all read from _data and _mkt — no extra API calls)
+    # Step 2: Run engines + all monitors
+    geo_alerts  = geo_risk_monitor()
+    oil_bar     = oil_progress_bar()
+    btc_spx     = btc_spx_correlation()
+    whale_sig   = whale_accumulation()
+    eth_sig     = eth_ecosystem_signal()
+    bottom_sig  = bottom_detector()
+    narrative   = narrative_vs_reality()
     lag    = lag_phase()
     stage  = liquidity_stage()
     rot    = rotation_phase()
@@ -510,7 +925,7 @@ def main():
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     msg = (
-        f"<b>📡 LIQUIDITY LAG INTELLIGENCE — V4.4</b>\n"
+        f"<b>📡 LIQUIDITY LAG INTELLIGENCE — V4.7</b>\n"
         f"<i>{ts}</i>\n"
         f"━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔧 <b>API Health:</b> {API_HEALTH}\n\n"
@@ -523,14 +938,27 @@ def main():
         f"  Liquidity Vector: <b>{vec}</b>\n"
         f"  Alt Momentum:     <b>{score}/100</b>\n\n"
         f"<b>[ RAW SIGNALS ]</b>\n"
-        f"  Fear & Greed:     {fr}/100\n"
-        f"  Funding Rate:     {f:.4f}\n"
-        f"  BTC Dominance:    {dom:.2f}%\n"
+        f"  Fear & Greed:      {fr}/100\n"
+        f"  Funding Rate:      {f:.4f}\n"
+        f"  BTC Dominance:     {dom:.2f}%\n"
         f"  ETH/BTC 5d Change: {ethbtc_chg:+.2f}%\n\n"
+        f"<b>[ 🛢 WAR PROGRESS BAR ]</b>\n"
+        f"  {oil_bar}\n\n"
+        f"<b>[ 📊 BTC/SPX ]</b>\n"
+        f"  {btc_spx['label']}\n\n"
         f"<b>[ GUIDANCE ]</b>\n"
         f"  {LAG_GUIDANCE.get(lag, 'No guidance available.')}\n"
         f"  Days since BTC peak: <b>{d_peak}d</b>\n"
         + (f"\n<b>[ ⚡ SIGNAL ]</b>\n  {combo}\n" if combo else "")
+        + (f"\n<b>[ 🐋 WHALE ]</b>\n  {whale_sig}\n" if whale_sig else "")
+        + (f"\n<b>[ 💎 ETH ]</b>\n  {eth_sig}\n" if eth_sig else "")
+        + (f"\n<b>[ 🎯 BOTTOM SIGNAL ]</b>\n  {bottom_sig}\n" if bottom_sig else "")
+        + (f"\n<b>[ 🕊️ NARRATIVE vs REALITY ]</b>\n  {narrative}\n" if narrative else "")
+        + (
+            "\n<b>[ 🌍 RISK ALERTS ]</b>\n" +
+            "\n".join(f"  {a['category']}: {a['title']}" for a in geo_alerts) + "\n"
+            if geo_alerts else ""
+        )
         + "━━━━━━━━━━━━━━━━━━━━━"
     )
 
