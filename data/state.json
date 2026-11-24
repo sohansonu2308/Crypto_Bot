@@ -1,13 +1,14 @@
 {
-  "version": 1,
+  "version": 2,
   "initialized": true,
-  "last_updated_utc": "2026-11-24T12:46:58.191189+00:00",
+  "last_updated_utc": "2026-11-24T15:11:49.007299+00:00",
   "channel_checkpoints": {
     "researchcitadel": 1225,
     "shitcapcentral": 3094,
     "blockchainwhispersbaby": 15522,
     "ProfitCircle_Official": 6689
   },
+  "channel_baselines": {},
   "memory": {
     "macro_themes": [
       "Risk-off conditions and persistent BTC downside dominate; the current BTC price is below levels discussed in much of the earlier weekly commentary, so those calls should not be treated as current support or confirmation.",
@@ -31,8 +32,7 @@
       "VIRTUAL",
       "ENA",
       "PUMP",
-      "FARTCOIN",
-      "ETH"
+      "FARTCOIN"
     ],
     "channel_credibility_notes": {
       "ProfitCircle_Official": "Dominated much of the supplied discussion with repeated trade calls, retrospective victory claims, exceptional accuracy or win-rate assertions, and Premium or report marketing. Treat performance claims as unverified and the frequent updates as promotional, not independent market confirmation.",
@@ -47,6 +47,7 @@
       "date": "2026-11-24",
       "phase": "Distribution / Noise",
       "confidence": 84,
+      "bull_ignition_score": null,
       "direct_answer": "The objective snapshot points to a risk-off, liquidity-contracting market rather than a confirmed bull ignition: BTC and ETH are down over seven days, total market cap fell sharply over 24 hours, stablecoin supply contracted 1.12% over seven days, DeFi TVL fell 3.53%, and sentime"
     }
   ]

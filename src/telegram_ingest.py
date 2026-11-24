@@ -1,10 +1,11 @@
-"""Zero-auth public Telegram channel scraper using https://t.me/s/{channel}."""
+"""Zero-auth public Telegram channel scraper + quantitative retail apathy/spam telemetry."""
 
 from __future__ import annotations
 
 import logging
 import random
 import re
+import statistics
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Callable
@@ -14,6 +15,7 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 
 from src.config import TelegramConfig, normalize_channel_name
+from src.state_store import ChannelBaseline
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,16 @@ _DEFAULT_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 
+# Promotional / VIP funnel / hindsight victory phrases common in retail KOL channels
+_PROMO_SPAM_RE = re.compile(
+    r"\b("
+    r"vip|premium\s+(?:group|channel|members|access)|paid\s+group|dm\s+to\s+join|"
+    r"spots?\s+left|win\s*rate|accuracy|told\s+you|easy\s+\d+x|printed\s+hard|"
+    r"join\s+now|exclusive\s+access|book\s+your\s+seat|discount\s+code"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 class TelegramMessage(BaseModel):
     channel: str
@@ -37,6 +49,105 @@ class TelegramMessage(BaseModel):
     views_raw: str | None = None
     has_media: bool = False
     media_types: list[str] = Field(default_factory=list)
+
+
+class ChannelTelemetry(BaseModel):
+    channel: str
+    posts_count: int = 0
+    posts_velocity_ratio: float | None = None
+    median_views: float | None = None
+    views_apathy_ratio: float | None = None
+    promo_spam_posts: int = 0
+    promo_spam_ratio: float = 0.0
+
+
+class TelegramTelemetrySummary(BaseModel):
+    total_posts: int = 0
+    overall_views_apathy_ratio: float | None = None
+    overall_velocity_ratio: float | None = None
+    overall_promo_spam_ratio: float = 0.0
+    per_channel: dict[str, ChannelTelemetry] = Field(default_factory=dict)
+
+
+def is_promo_or_hindsight_spam(text: str) -> bool:
+    """Return True if message matches classic VIP funnel / hindsight win-rate marketing."""
+    if not text:
+        return False
+    return bool(_PROMO_SPAM_RE.search(text))
+
+
+def compute_channel_baselines(
+    messages_by_channel: dict[str, list[TelegramMessage]],
+    backfill_days: int = 60,
+) -> dict[str, ChannelBaseline]:
+    """Compute 60-day rolling posts/day and median views per post for each channel."""
+    days = max(1, backfill_days)
+    baselines: dict[str, ChannelBaseline] = {}
+    for raw_ch, msgs in messages_by_channel.items():
+        ch = normalize_channel_name(raw_ch)
+        views_list = [float(m.views) for m in msgs if m.views is not None and m.views > 0]
+        median_views = round(statistics.median(views_list), 1) if views_list else 0.0
+        posts_per_day = round(len(msgs) / float(days), 2)
+        baselines[ch] = ChannelBaseline(
+            baseline_posts_per_day=posts_per_day,
+            baseline_median_views=median_views,
+            sample_messages=len(msgs),
+        )
+    return baselines
+
+
+def compute_daily_telemetry(
+    messages_by_channel: dict[str, list[TelegramMessage]],
+    baselines: dict[str, ChannelBaseline],
+    window_days: float = 1.0,
+) -> TelegramTelemetrySummary:
+    """Measure retail engagement apathy (`views/post` vs 60d baseline) and VIP promo density."""
+    per_ch: dict[str, ChannelTelemetry] = {}
+    apathy_ratios: list[float] = []
+    velocity_ratios: list[float] = []
+    total_posts = 0
+    total_promo = 0
+
+    for raw_ch, msgs in messages_by_channel.items():
+        ch = normalize_channel_name(raw_ch)
+        base = baselines.get(ch)
+        cnt = len(msgs)
+        total_posts += cnt
+
+        promo_cnt = sum(1 for m in msgs if is_promo_or_hindsight_spam(m.text))
+        total_promo += promo_cnt
+        promo_ratio = round(promo_cnt / cnt, 3) if cnt > 0 else 0.0
+
+        views_list = [float(m.views) for m in msgs if m.views is not None and m.views > 0]
+        med_views = round(statistics.median(views_list), 1) if views_list else None
+
+        vel_ratio: float | None = None
+        apathy_ratio: float | None = None
+        if base and base.baseline_posts_per_day > 0:
+            daily_rate = cnt / max(0.25, window_days)
+            vel_ratio = round(daily_rate / base.baseline_posts_per_day, 2)
+            velocity_ratios.append(vel_ratio)
+        if med_views is not None and base and base.baseline_median_views > 0:
+            apathy_ratio = round(med_views / base.baseline_median_views, 2)
+            apathy_ratios.append(apathy_ratio)
+
+        per_ch[ch] = ChannelTelemetry(
+            channel=ch,
+            posts_count=cnt,
+            posts_velocity_ratio=vel_ratio,
+            median_views=med_views,
+            views_apathy_ratio=apathy_ratio,
+            promo_spam_posts=promo_cnt,
+            promo_spam_ratio=promo_ratio,
+        )
+
+    return TelegramTelemetrySummary(
+        total_posts=total_posts,
+        overall_views_apathy_ratio=round(statistics.median(apathy_ratios), 2) if apathy_ratios else None,
+        overall_velocity_ratio=round(statistics.median(velocity_ratios), 2) if velocity_ratios else None,
+        overall_promo_spam_ratio=round(total_promo / total_posts, 3) if total_posts > 0 else 0.0,
+        per_channel=per_ch,
+    )
 
 
 def parse_views_count(raw: str | None) -> int | None:
@@ -89,7 +200,9 @@ def parse_channel_page(html: str, channel: str) -> list[TelegramMessage]:
         else:
             text = ""
 
-        fwd_el = widget.select_one("a.tgme_widget_message_forwarded_from_name, span.tgme_widget_message_forwarded_from_name")
+        fwd_el = widget.select_one(
+            "a.tgme_widget_message_forwarded_from_name, span.tgme_widget_message_forwarded_from_name"
+        )
         forwarded_from = fwd_el.get_text(strip=True) if fwd_el else None
 
         views_el = widget.select_one("span.tgme_widget_message_views")
@@ -285,7 +398,6 @@ class TelegramScraper:
                     break
                 if before_id is not None and oldest_on_page >= before_id:
                     break
-                # If no checkpoint existed yet, limit initial daily catch-up to 3 pages
                 if last_id == 0 and page_num >= 2:
                     break
 

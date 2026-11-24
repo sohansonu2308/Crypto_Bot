@@ -1,14 +1,21 @@
-"""Tests for configuration loading, env overrides, and Telegram HTML scraping/pagination."""
+"""Tests for configuration loading, Telegram scraping, and retail apathy/promo telemetry."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 
 import httpx
-import pytest
 
 from src.config import TelegramConfig, load_config, normalize_channel_name
-from src.telegram_ingest import TelegramScraper, parse_channel_page, parse_views_count
+from src.telegram_ingest import (
+    TelegramMessage,
+    TelegramScraper,
+    compute_channel_baselines,
+    compute_daily_telemetry,
+    is_promo_or_hindsight_spam,
+    parse_channel_page,
+    parse_views_count,
+)
 
 
 def _build_tg_html(channel: str, posts: list[dict]) -> str:
@@ -135,6 +142,43 @@ def test_telegram_backfill_pagination_and_daily_checkpoints():
     assert [m.message_id for m in backfill["alpha"]] == [201, 202, 203]
     assert any("before=202" in u for u in seen_urls)
 
-    # Daily mode with checkpoint 202 should only return message 203
     daily = scraper.fetch_daily(checkpoints={"alpha": 202}, now_utc=now)
     assert [m.message_id for m in daily["alpha"]] == [203]
+
+
+def test_telegram_apathy_and_promo_spam_telemetry():
+    assert is_promo_or_hindsight_spam("Join our VIP group! 94% win rate, 3 spots left!") is True
+    assert is_promo_or_hindsight_spam("BTC spot volume rose 40% on Coinbase today.") is False
+
+    ts = datetime(2026, 11, 24, 1, 0, tzinfo=timezone.utc)
+    hist = {
+        "kol_chan": [
+            TelegramMessage(channel="kol_chan", message_id=i, timestamp_utc=ts, text="Post", views=10_000)
+            for i in range(1, 121)
+        ]
+    }
+    baselines = compute_channel_baselines(hist, backfill_days=60)
+    assert baselines["kol_chan"].baseline_posts_per_day == 2.0
+    assert baselines["kol_chan"].baseline_median_views == 10_000.0
+
+    daily_msgs = {
+        "kol_chan": [
+            TelegramMessage(
+                channel="kol_chan",
+                message_id=121,
+                timestamp_utc=ts,
+                text="Told you! Join VIP premium channel now!",
+                views=5_000,
+            ),
+            TelegramMessage(
+                channel="kol_chan",
+                message_id=122,
+                timestamp_utc=ts,
+                text="Quiet market range.",
+                views=5_000,
+            ),
+        ]
+    }
+    telemetry = compute_daily_telemetry(daily_msgs, baselines)
+    assert telemetry.overall_views_apathy_ratio == 0.50
+    assert telemetry.overall_promo_spam_ratio == 0.50

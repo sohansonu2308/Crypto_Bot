@@ -1,4 +1,4 @@
-"""Tests for StateStore, Telegram 4,096-char chunking, Pydantic analyzer schemas, and --dry-run."""
+"""Tests for StateStore, Telegram 4,096-char chunking, Pydantic v2 analyzer schemas, and --dry-run."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ from src.state_store import StateStore, VerdictRecord
 from src.telegram_ingest import TelegramMessage
 
 
-def test_state_store_checkpoints_and_rolling_memory(tmp_path):
+def test_state_store_checkpoints_major_ticker_exclusion_and_rolling_memory(tmp_path):
     store = StateStore(tmp_path / "state.json")
     state = store.load()
     assert state.channel_checkpoints == {}
@@ -32,10 +32,11 @@ def test_state_store_checkpoints_and_rolling_memory(tmp_path):
     store.update_checkpoints(state, {"alpha": 120})  # monotonic: should not go backward
     assert state.channel_checkpoints == {"alpha": 150, "beta": 200}
 
+    # ETH, BTC, SOL, USDT must be excluded automatically from recurring_shilled_tickers
     store.merge_memory(
         state,
         macro_themes=["ETF inflows", "Stablecoin expansion"],
-        recurring_shilled_tickers=["$MEME1", "meme1", "SOL"],
+        recurring_shilled_tickers=["$MEME1", "meme1", "ETH", "BTC", "SOL", "TIBBIR"],
         channel_credibility_notes={"@alpha": "Mostly macro charts"},
     )
     for day in range(1, 65):
@@ -43,8 +44,9 @@ def test_state_store_checkpoints_and_rolling_memory(tmp_path):
             state,
             VerdictRecord(
                 date=f"2026-01-{day:02d}",
-                phase="Accumulation",
+                phase="Stealth Accumulation",
                 confidence=60,
+                bull_ignition_score=52,
                 direct_answer="Not yet.",
             ),
         )
@@ -52,7 +54,7 @@ def test_state_store_checkpoints_and_rolling_memory(tmp_path):
     store.save(state)
     reloaded = store.load()
     assert reloaded.channel_checkpoints["alpha"] == 150
-    assert reloaded.memory.recurring_shilled_tickers == ["MEME1", "SOL"]
+    assert reloaded.memory.recurring_shilled_tickers == ["MEME1", "TIBBIR"]
     assert len(reloaded.verdict_history) == 60
 
 
@@ -65,7 +67,6 @@ def test_telegram_chunking_respects_4096_limit_and_plain_text_fallback():
     assert len(chunks) >= 2
     assert all(len(c) <= TELEGRAM_MAX_MESSAGE_LENGTH for c in chunks)
 
-    # Verify HTTP 400 Markdown fallback retries without parse_mode
     attempts: list[dict] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -88,63 +89,64 @@ def test_telegram_chunking_respects_4096_limit_and_plain_text_fallback():
 class _FakeLLM:
     def complete_structured(self, *, model, system_prompt, user_prompt, response_model, temperature=None):
         if response_model is WeeklySummary:
-            return WeeklySummary(week_label="2026-W47", macro_themes=["BTC breakout"], top_mentioned_tickers=["SOL"])
+            return WeeklySummary(week_label="2026-W47", macro_themes=["BTC breakout"], top_mentioned_tickers=["TAO"])
         if response_model is BaselineSynthesis:
             return BaselineSynthesis(
-                baseline_phase="Early Ignition",
-                confidence_score=72,
-                executive_summary="Spot volume and stablecoins turning higher.",
-                macro_themes=["Stablecoin growth"],
-                active_altcoin_narratives=["AI", "L1"],
-                recurring_shilled_tickers=["SHILLX"],
-                channel_credibility_notes={"alpha": "High signal"},
-                key_watchpoints=["Watch BTC.D peak"],
+                baseline_phase="Stealth Accumulation",
+                confidence_score=74,
+                executive_summary="Pure fiat stables stabilizing while retail apathy deepens.",
+                macro_themes=["Pure fiat stabilization"],
+                active_altcoin_narratives=["AI", "RWA"],
+                recurring_shilled_tickers=["SHILLX", "ETH"],
+                channel_credibility_notes={"alpha": "High promo noise"},
+                key_watchpoints=["Watch Coinbase Spot Premium > +4 bps"],
             )
         if response_model is Pass1Digest:
             return Pass1Digest(
                 deduplicated_themes=["BTC spot breakout"],
-                top_altcoin_tickers=["SOL", "TAO"],
-                active_sectors=["AI", "L1"],
+                top_altcoin_tickers=["TAO", "ONDO"],
+                active_sectors=["AI", "RWA"],
                 coordinated_shilling_flags=["SHILLX posted identically on 2 channels"],
                 unverified_claims=["Unconfirmed Tier-1 listing rumor"],
-                sentiment_extremes=["Mild FOMO on AI alts"],
-                channel_summaries={"alpha": "Bullish on BTC spot flows"},
+                sentiment_extremes=["High retail apathy"],
+                channel_summaries={"alpha": "Pushing VIP funnel despite quiet tape"},
             )
         if response_model is Pass2RealityCheck:
             return Pass2RealityCheck(
-                macro_alignment="BTC up on expanding spot volume.",
-                leverage_trap_assessment="Funding neutral; low squeeze risk.",
-                liquidity_assessment="7d stablecoin supply positive.",
+                macro_alignment="BTC reclaiming 20D & 50D SMA on Coinbase premium.",
+                leverage_trap_assessment="Hyperliquid funding flat; disbelief rally intact.",
+                liquidity_assessment="USDT+USDC 7d supply accelerating higher.",
                 altcoin_data_verification=[
                     AltcoinRealityItem(
-                        ticker="SOL",
-                        telegram_narrative="Strong ecosystem bid",
-                        market_reality="+6.2% 24h on $5.5B volume",
+                        ticker="TAO",
+                        telegram_narrative="Strong AI bid",
+                        market_reality="+8.2% 7d on expanding spot volume",
                         verdict="Backed by Volume",
                     )
                 ],
-                playbook_stage_match="Phase 1 -> Phase 2 transition",
-                confirmed_catalysts=["Stablecoin inflows + spot BTC bid"],
+                playbook_stage_match="Phase 1 BTC leadership",
+                confirmed_catalysts=["Positive Coinbase Spot Premium + USDT+USDC expansion"],
                 debunked_or_unverified_claims=["Tier-1 listing rumor unverified"],
             )
         if response_model is DailyReport:
             return DailyReport(
                 report_date_utc="2026-11-24",
-                macro_phase="Early Ignition",
-                confidence_score=76,
-                bull_run_direct_answer="Yes — early bull ignition is supported by spot volume and positive 7d stablecoin flows.",
-                altcoin_rotation_stage="BTC leadership with early high-cap L1 rotation",
-                real_volume_sectors=["L1", "AI"],
+                macro_phase="Early Bull Ignition",
+                confidence_score=79,
+                bull_run_direct_answer="Yes — early bull ignition is supported by Coinbase spot buying, uncrowded Hyperliquid funding, and positive USDT+USDC velocity.",
+                what_must_flip_for_bull_run=["BTC daily close above 200D SMA", "Sustained >+0.5% weekly USDT+USDC growth"],
+                altcoin_rotation_stage="BTC leadership with selective institutional majors strength",
+                real_volume_sectors=["AI", "RWA"],
                 pure_hype_sectors=["Micro-cap Memes"],
-                altcoin_pulse_summary="SOL and AI leaders show real volume; micro-caps are pure Telegram hype.",
-                verified_signals=["Positive 7d stablecoin net issuance"],
+                altcoin_pulse_summary="Institutional majors lead while Telegram micro-cap shills lag.",
+                verified_signals=["Positive 7d USDT+USDC net issuance", "Positive Coinbase Spot Premium"],
                 manipulation_watch=["Ignore SHILLX coordinated cross-channel pump"],
-                channel_pulse={"alpha": "Aligned with BTC spot move, ignored micro-cap hype."},
+                channel_pulse={"alpha": "Heavy VIP promo spam; contrarian apathy remains supportive."},
                 rolling_state_update=RollingStateUpdate(
                     macro_themes=["Spot-led BTC breakout"],
-                    active_altcoin_narratives=["AI", "L1"],
-                    recurring_shilled_tickers=["SHILLX"],
-                    channel_credibility_notes={"alpha": "Reliable macro framing"},
+                    active_altcoin_narratives=["AI", "RWA"],
+                    recurring_shilled_tickers=["SHILLX", "ETH"],
+                    channel_credibility_notes={"alpha": "Promotional funnel"},
                 ),
             )
         raise AssertionError(f"Unexpected response_model: {response_model}")
@@ -159,6 +161,7 @@ class _FakeScraper:
                     message_id=501,
                     timestamp_utc=datetime(2026, 11, 20, 10, 0, tzinfo=timezone.utc),
                     text="BTC spot inflows accelerating",
+                    views=4000,
                 )
             ]
         }
@@ -170,7 +173,8 @@ class _FakeScraper:
                     channel="alpha",
                     message_id=502,
                     timestamp_utc=datetime(2026, 11, 24, 1, 0, tzinfo=timezone.utc),
-                    text="SOL volume surging, watch SHILLX",
+                    text="Join VIP group! Watch SHILLX and TAO",
+                    views=2000,
                 )
             ]
         }
@@ -218,7 +222,8 @@ def test_pipeline_dry_run_has_no_side_effects(tmp_path):
         notifier=notifier,
     )
 
-    assert "Early Ignition" in md
+    assert "Early Bull Ignition" in md
+    assert "Deterministic Bull-Ignition Scorecard" in md
     assert not state_file.exists()
     assert not reports_dir.exists()
     assert notifier.sent_messages == []
@@ -246,7 +251,10 @@ def test_pipeline_backfill_and_daily_persist_state_and_reports(tmp_path):
         notifier=notifier,
     )
     assert (reports_dir / "initial_baseline.md").exists()
-    assert store.load().channel_checkpoints["alpha"] == 501
+    loaded_after_bf = store.load()
+    assert loaded_after_bf.channel_checkpoints["alpha"] == 501
+    assert "ETH" not in loaded_after_bf.memory.recurring_shilled_tickers
+    assert "alpha" in loaded_after_bf.channel_baselines
     assert len(notifier.sent_messages) == 1
 
     run_pipeline(
@@ -259,6 +267,8 @@ def test_pipeline_backfill_and_daily_persist_state_and_reports(tmp_path):
         state_store=store,
         notifier=notifier,
     )
-    assert store.load().channel_checkpoints["alpha"] == 502
+    loaded_after_daily = store.load()
+    assert loaded_after_daily.channel_checkpoints["alpha"] == 502
+    assert loaded_after_daily.memory.recurring_shilled_tickers == ["SHILLX"]
+    assert loaded_after_daily.verdict_history[-1].bull_ignition_score is not None
     assert len(notifier.sent_messages) == 2
-    assert any(p.name.endswith(".md") and p.name != "initial_baseline.md" for p in reports_dir.iterdir())

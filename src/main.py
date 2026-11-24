@@ -1,4 +1,4 @@
-"""CLI entrypoint for the automated crypto analysis pipeline."""
+"""CLI entrypoint for the whale-grade automated crypto analysis pipeline."""
 
 from __future__ import annotations
 
@@ -16,8 +16,13 @@ from src.notifier import (
     format_baseline_report_markdown,
     format_daily_report_markdown,
 )
+from src.quant_scoring import compute_bull_ignition_scorecard
 from src.state_store import StateStore, VerdictRecord
-from src.telegram_ingest import TelegramScraper
+from src.telegram_ingest import (
+    TelegramScraper,
+    compute_channel_baselines,
+    compute_daily_telemetry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +77,17 @@ def run_pipeline(
                 channels=cfg.telegram.channels,
                 days=cfg.telegram.backfill_days,
             )
+            baselines = compute_channel_baselines(
+                messages_by_channel,
+                backfill_days=cfg.telegram.backfill_days,
+            )
             snapshot = mkt_fetcher.fetch_snapshot()
-            baseline = analyzer.run_backfill(messages_by_channel, snapshot)
+            scorecard = compute_bull_ignition_scorecard(snapshot)
+            baseline = analyzer.run_backfill(
+                messages_by_channel=messages_by_channel,
+                market_snapshot=snapshot,
+                scorecard=scorecard,
+            )
 
             message_counts = {ch: len(msgs) for ch, msgs in messages_by_channel.items()}
             report_md = format_baseline_report_markdown(
@@ -81,10 +95,12 @@ def run_pipeline(
                 snapshot=snapshot,
                 backfill_days=cfg.telegram.backfill_days,
                 message_counts=message_counts,
+                scorecard=scorecard,
             )
 
             state.initialized = True
             store.update_checkpoints(state, _latest_ids_by_channel(messages_by_channel))
+            store.update_channel_baselines(state, baselines)
             store.merge_memory(
                 state,
                 macro_themes=baseline.macro_themes,
@@ -99,6 +115,7 @@ def run_pipeline(
                     date=datetime.now(timezone.utc).strftime("%Y-%m-%d"),
                     phase=baseline.baseline_phase,
                     confidence=baseline.confidence_score,
+                    bull_ignition_score=scorecard.total_score,
                     direct_answer=baseline.executive_summary[:280],
                 ),
             )
@@ -122,15 +139,32 @@ def run_pipeline(
                 checkpoints=state.channel_checkpoints,
                 channels=cfg.telegram.channels,
             )
+            telemetry = compute_daily_telemetry(
+                messages_by_channel=messages_by_channel,
+                baselines=state.channel_baselines,
+            )
 
-            # Pass 1: filter & extract top altcoin tickers
-            pass1 = analyzer.run_daily_pass1(messages_by_channel, state)
+            # Pass 1: filter, flag promo spam, and extract top speculative altcoin tickers
+            pass1 = analyzer.run_daily_pass1(
+                messages_by_channel=messages_by_channel,
+                state=state,
+                telemetry=telemetry,
+            )
 
-            # Fetch objective market ground truth + Pass 1 altcoin metrics
+            # Fetch institutional market ground truth + Pass 1 altcoin metrics
             snapshot = mkt_fetcher.fetch_snapshot(altcoin_tickers=pass1.top_altcoin_tickers)
 
-            # Pass 2: reality check vs market data & bull-run playbook
-            pass2 = analyzer.run_daily_pass2(pass1, snapshot, state)
+            # Compute deterministic 0-100 Bull-Ignition Scorecard before LLM reality check
+            scorecard = compute_bull_ignition_scorecard(snapshot=snapshot, telemetry=telemetry)
+
+            # Pass 2: reality check vs institutional flows, structure & playbook
+            pass2 = analyzer.run_daily_pass2(
+                pass1=pass1,
+                market_snapshot=snapshot,
+                state=state,
+                scorecard=scorecard,
+                telemetry=telemetry,
+            )
 
             # Pass 3: final daily briefing & rolling state update
             today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -139,9 +173,16 @@ def run_pipeline(
                 pass2=pass2,
                 market_snapshot=snapshot,
                 state=state,
+                scorecard=scorecard,
+                telemetry=telemetry,
                 report_date_utc=today_utc,
             )
-            report_md = format_daily_report_markdown(report, snapshot)
+            report_md = format_daily_report_markdown(
+                report=report,
+                snapshot=snapshot,
+                scorecard=scorecard,
+                telemetry=telemetry,
+            )
 
             store.update_checkpoints(state, _latest_ids_by_channel(messages_by_channel))
             store.merge_memory(
@@ -158,6 +199,7 @@ def run_pipeline(
                     date=report.report_date_utc,
                     phase=report.macro_phase,
                     confidence=report.confidence_score,
+                    bull_ignition_score=scorecard.total_score,
                     direct_answer=report.bull_run_direct_answer,
                 ),
             )
@@ -186,7 +228,7 @@ def run_pipeline(
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Automated Crypto Telegram & Market Analysis Pipeline")
+    parser = argparse.ArgumentParser(description="Automated Crypto Telegram & Institutional Market Analysis Pipeline")
     parser.add_argument(
         "--mode",
         choices=("backfill", "daily"),

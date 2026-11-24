@@ -11,11 +11,23 @@ from pydantic import BaseModel, Field
 
 from src.config import normalize_channel_name
 
+# Core liquid majors & stablecoins that must NEVER be recorded as "shilled micro-cap tickers"
+EXCLUDED_MAJOR_TICKERS: frozenset[str] = frozenset(
+    {"BTC", "ETH", "SOL", "BNB", "XRP", "USDT", "USDC", "DAI", "USDE", "USD"}
+)
+
+
+class ChannelBaseline(BaseModel):
+    baseline_posts_per_day: float = 0.0
+    baseline_median_views: float = 0.0
+    sample_messages: int = 0
+
 
 class VerdictRecord(BaseModel):
     date: str
     phase: str
     confidence: int = Field(ge=0, le=100)
+    bull_ignition_score: int | None = None
     direct_answer: str
 
 
@@ -27,12 +39,28 @@ class RollingMemory(BaseModel):
 
 
 class BotState(BaseModel):
-    version: int = 1
+    version: int = 2
     initialized: bool = False
     last_updated_utc: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     channel_checkpoints: dict[str, int] = Field(default_factory=dict)
+    channel_baselines: dict[str, ChannelBaseline] = Field(default_factory=dict)
     memory: RollingMemory = Field(default_factory=RollingMemory)
     verdict_history: list[VerdictRecord] = Field(default_factory=list)
+
+
+def clean_shilled_tickers(tickers: list[str], limit: int = 20) -> list[str]:
+    """Normalize shilled ticker symbols and strip out core majors/stablecoins."""
+    cleaned_list: list[str] = []
+    seen: set[str] = set()
+    for raw in tickers:
+        sym = raw.strip().upper().lstrip("$")
+        if not sym or sym in EXCLUDED_MAJOR_TICKERS or sym in seen:
+            continue
+        seen.add(sym)
+        cleaned_list.append(sym)
+        if len(cleaned_list) >= limit:
+            break
+    return cleaned_list
 
 
 class StateStore:
@@ -49,9 +77,15 @@ class StateStore:
             return BotState()
         with self.path.open("r", encoding="utf-8") as f:
             raw = json.load(f)
-        return BotState.model_validate(raw)
+        state = BotState.model_validate(raw)
+        # Sanitize any legacy major tickers (e.g., ETH) from recurring_shilled_tickers on load
+        state.memory.recurring_shilled_tickers = clean_shilled_tickers(
+            state.memory.recurring_shilled_tickers, self.MAX_LIST_ITEMS
+        )
+        return state
 
     def save(self, state: BotState) -> None:
+        state.version = 2
         state.last_updated_utc = datetime.now(timezone.utc).isoformat()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = self.path.with_suffix(".json.tmp")
@@ -69,6 +103,15 @@ class StateStore:
                 state.channel_checkpoints[ch] = msg_id
         return state
 
+    def update_channel_baselines(
+        self,
+        state: BotState,
+        baselines: dict[str, ChannelBaseline],
+    ) -> BotState:
+        for raw_ch, baseline in baselines.items():
+            state.channel_baselines[normalize_channel_name(raw_ch)] = baseline
+        return state
+
     def merge_memory(
         self,
         state: BotState,
@@ -84,8 +127,8 @@ class StateStore:
             state.memory = RollingMemory(
                 macro_themes=_dedupe_cap(macro_themes or [], self.MAX_LIST_ITEMS),
                 active_altcoin_narratives=_dedupe_cap(active_altcoin_narratives or [], self.MAX_LIST_ITEMS),
-                recurring_shilled_tickers=_dedupe_cap(
-                    [t.upper().lstrip("$") for t in (recurring_shilled_tickers or [])],
+                recurring_shilled_tickers=clean_shilled_tickers(
+                    recurring_shilled_tickers or [],
                     self.MAX_LIST_ITEMS,
                 ),
                 channel_credibility_notes={
@@ -105,9 +148,9 @@ class StateStore:
                 active_altcoin_narratives + state.memory.active_altcoin_narratives, self.MAX_LIST_ITEMS
             )
         if recurring_shilled_tickers is not None:
-            normalized_tickers = [t.upper().lstrip("$") for t in recurring_shilled_tickers]
-            state.memory.recurring_shilled_tickers = _dedupe_cap(
-                normalized_tickers + state.memory.recurring_shilled_tickers, self.MAX_LIST_ITEMS
+            state.memory.recurring_shilled_tickers = clean_shilled_tickers(
+                recurring_shilled_tickers + state.memory.recurring_shilled_tickers,
+                self.MAX_LIST_ITEMS,
             )
         if channel_credibility_notes:
             for raw_ch, note in channel_credibility_notes.items():

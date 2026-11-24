@@ -1,9 +1,9 @@
 telegram:
   channels:
-    - channel_1
-    - channel_2
-    - channel_3
-    - channel_4
+    - researchcitadel
+    - shitcapcentral
+    - blockchainwhispersbaby
+    - ProfitCircle_Official
   backfill_days: 60
   request_delay_min_seconds: 1.0
   request_delay_max_seconds: 2.5
@@ -15,11 +15,16 @@ market_data:
   max_retries: 3
   endpoints:
     coingecko_base: "https://api.coingecko.com/api/v3"
+    coinbase_base: "https://api.exchange.coinbase.com"
+    kraken_base: "https://api.kraken.com/0/public"
+    hyperliquid_info: "https://api.hyperliquid.xyz/info"
+    deribit_base: "https://www.deribit.com/api/v2/public"
     binance_spot_base: "https://api.binance.com/api/v3"
     binance_futures_base: "https://fapi.binance.com/fapi/v1"
     defillama_stablecoins: "https://stablecoins.llama.fi/stablecoincharts/all"
     defillama_tvl: "https://api.llama.fi/v2/historicalChainTvl"
     fear_and_greed: "https://api.alternative.me/fng/"
+    fred_csv_base: "https://fred.stlouisfed.org/graph/fredgraph.csv"
 
 llm:
   base_url: "https://api.openai.com/v1"

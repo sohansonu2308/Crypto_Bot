@@ -15,9 +15,16 @@ from pydantic import BaseModel, Field, field_validator
 def normalize_channel_name(raw: str) -> str:
     """Strip whitespace, URL prefixes, and leading '@' from a Telegram channel handle."""
     cleaned = raw.strip()
-    for prefix in ("https://t.me/s/", "http://t.me/s/", "https://t.me/", "http://t.me/", "t.me/s/", "t.me/"):
+    for prefix in (
+        "https://t.me/s/",
+        "http://t.me/s/",
+        "https://t.me/",
+        "http://t.me/",
+        "t.me/s/",
+        "t.me/",
+    ):
         if cleaned.lower().startswith(prefix):
-            cleaned = cleaned[len(prefix):]
+            cleaned = cleaned[len(prefix) :]
             break
     cleaned = cleaned.strip("/")
     cleaned = cleaned.lstrip("@").strip()
@@ -25,7 +32,14 @@ def normalize_channel_name(raw: str) -> str:
 
 
 class TelegramConfig(BaseModel):
-    channels: list[str] = Field(default_factory=lambda: ["channel_1", "channel_2", "channel_3", "channel_4"])
+    channels: list[str] = Field(
+        default_factory=lambda: [
+            "researchcitadel",
+            "shitcapcentral",
+            "blockchainwhispersbaby",
+            "ProfitCircle_Official",
+        ]
+    )
     backfill_days: int = 60
     request_delay_min_seconds: float = 1.0
     request_delay_max_seconds: float = 2.5
@@ -55,11 +69,16 @@ class TelegramConfig(BaseModel):
 
 class MarketEndpointsConfig(BaseModel):
     coingecko_base: str = "https://api.coingecko.com/api/v3"
+    coinbase_base: str = "https://api.exchange.coinbase.com"
+    kraken_base: str = "https://api.kraken.com/0/public"
+    hyperliquid_info: str = "https://api.hyperliquid.xyz/info"
+    deribit_base: str = "https://www.deribit.com/api/v2/public"
     binance_spot_base: str = "https://api.binance.com/api/v3"
     binance_futures_base: str = "https://fapi.binance.com/fapi/v1"
     defillama_stablecoins: str = "https://stablecoins.llama.fi/stablecoincharts/all"
     defillama_tvl: str = "https://api.llama.fi/v2/historicalChainTvl"
     fear_and_greed: str = "https://api.alternative.me/fng/"
+    fred_csv_base: str = "https://fred.stlouisfed.org/graph/fredgraph.csv"
 
 
 class MarketDataConfig(BaseModel):
@@ -142,7 +161,6 @@ def load_config(config_path: str | Path = "config.yaml", load_dotenv_file: bool 
         llm_data["reasoning_model"] = env_reasoning
     elif env_fast:
         llm_data["fast_model"] = env_fast
-        # If only one model is specified via env, default reasoning model to it when not overridden
         llm_data["reasoning_model"] = env_fast
     elif env_reasoning:
         llm_data["reasoning_model"] = env_reasoning
