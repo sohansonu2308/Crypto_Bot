@@ -14,6 +14,7 @@ import httpx
 from pydantic import BaseModel, Field
 
 from src.config import MarketDataConfig
+from src.state_store import EXCLUDED_MAJOR_TICKERS
 
 logger = logging.getLogger(__name__)
 
@@ -960,7 +961,13 @@ class MarketDataFetcher:
         seen: set[str] = set()
         for raw in tickers:
             sym = raw.strip().upper().lstrip("$")
-            if not sym or sym in ("BTC", "ETH", "USDT", "USDC", "USD") or sym in seen:
+            # Allow liquid crypto majors like SOL/BNB/XRP in altcoin lookup, but skip BTC/ETH/stables & TradFi symbols
+            if (
+                not sym
+                or sym in ("BTC", "ETH", "USDT", "USDC", "DAI", "USDE", "USD")
+                or (sym in EXCLUDED_MAJOR_TICKERS and sym not in ("SOL", "BNB", "XRP"))
+                or sym in seen
+            ):
                 continue
             seen.add(sym)
             cleaned_tickers.append(sym)

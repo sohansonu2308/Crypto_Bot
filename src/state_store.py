@@ -11,9 +11,55 @@ from pydantic import BaseModel, Field
 
 from src.config import normalize_channel_name
 
-# Core liquid majors & stablecoins that must NEVER be recorded as "shilled micro-cap tickers"
+# Core liquid majors, stablecoins, and TradFi macro symbols that must NEVER be recorded as "shilled micro-cap tickers"
 EXCLUDED_MAJOR_TICKERS: frozenset[str] = frozenset(
-    {"BTC", "ETH", "SOL", "BNB", "XRP", "USDT", "USDC", "DAI", "USDE", "USD"}
+    {
+        "BTC",
+        "BITCOIN",
+        "ETH",
+        "SOL",
+        "BNB",
+        "XRP",
+        "USDT",
+        "USDC",
+        "DAI",
+        "USDE",
+        "USD",
+        "EUR",
+        "GBP",
+        "GOLD",
+        "SILVER",
+        "XAU",
+        "XAG",
+        "OIL",
+        "WTI",
+        "BRENT",
+        "SPX",
+        "NDX",
+        "DJI",
+        "QQQ",
+        "SPY",
+        "IWM",
+        "TLT",
+        "DXY",
+        "YIELDS",
+        "US10Y",
+        "NVDA",
+        "AAPL",
+        "MSFT",
+        "TSLA",
+        "META",
+        "GOOGL",
+        "AMZN",
+        "COIN",
+        "MSTR",
+        "URA",
+        "XLE",
+        "COAL",
+        "FOMC",
+        "CPI",
+        "GDP",
+    }
 )
 
 
