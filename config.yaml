@@ -1,0 +1,35 @@
+telegram:
+  channels:
+    - channel_1
+    - channel_2
+    - channel_3
+    - channel_4
+  backfill_days: 60
+  request_delay_min_seconds: 1.0
+  request_delay_max_seconds: 2.5
+  max_pages_per_channel: 80
+  request_timeout_seconds: 20
+
+market_data:
+  timeout_seconds: 15
+  max_retries: 3
+  endpoints:
+    coingecko_base: "https://api.coingecko.com/api/v3"
+    binance_spot_base: "https://api.binance.com/api/v3"
+    binance_futures_base: "https://fapi.binance.com/fapi/v1"
+    defillama_stablecoins: "https://stablecoins.llama.fi/stablecoincharts/all"
+    defillama_tvl: "https://api.llama.fi/v2/historicalChainTvl"
+    fear_and_greed: "https://api.alternative.me/fng/"
+
+llm:
+  base_url: "https://api.openai.com/v1"
+  fast_model: "gpt-6-mini"
+  reasoning_model: "gpt-6"
+  timeout_seconds: 90
+  max_retries: 4
+  temperature: 0.2
+
+paths:
+  state_file: "data/state.json"
+  reports_dir: "reports"
+  playbook_file: "knowledge/bull_run_playbook.md"
