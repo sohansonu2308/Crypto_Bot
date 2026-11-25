@@ -1,12 +1,12 @@
 {
   "version": 2,
   "initialized": true,
-  "last_updated_utc": "2026-11-25T05:58:30.155192+00:00",
+  "last_updated_utc": "2026-11-25T11:38:36.382372+00:00",
   "channel_checkpoints": {
     "researchcitadel": 1225,
-    "shitcapcentral": 3094,
+    "shitcapcentral": 3096,
     "blockchainwhispersbaby": 15522,
-    "ProfitCircle_Official": 6691
+    "ProfitCircle_Official": 6693
   },
   "channel_baselines": {
     "researchcitadel": {
@@ -32,6 +32,10 @@
   },
   "memory": {
     "macro_themes": [
+      "BTC remains in a severe markdown: down 9.00% over 7 days, below its 20D/50D/200D SMAs, with no higher-low structure and below-average spot volume.",
+      "USDT+USDC supply is contracting over both 7 and 30 days. Slight outflow deceleration is not a confirmed liquidity inflection; USDT remains at a 12.35 bps discount.",
+      "Extreme Fear, negative BTC funding and basis, and very low Telegram attention support Capitulation / Bottoming Watch, but spot absorption is not confirmed.",
+      "Fed net liquidity is modestly positive over four weeks, while DeFi TVL and broad liquid-major performance remain weak.",
       "Q4 markdown persists: BTC is down 8.14% over 7 days and remains substantially below its 20D, 50D, and falling 200D SMAs; current spot volume is below its 20-day average.",
       "Pure fiat stablecoin supply is contracting on both 7-day and 30-day measures; slight weekly outflow deceleration is not a confirmed liquidity turn.",
       "USDT's 13.45 bps discount signals redemption pressure, while the near-neutral Coinbase premium does not show meaningful institutional accumulation.",
@@ -43,6 +47,9 @@
       "Cross-asset backdrop: US Fed Net Liquidity ($5,824.5B) expanded +$23.1B (+0.40% 4w), while October Nasdaq AI-capex valuation fears and rotation into Gold/Silver dominated KOL macro narratives."
     ],
     "active_altcoin_narratives": [
+      "No verified token-level altcoin narrative or volume-backed rotation today; the objective altcoin feed was skipped and Telegram reported no altcoin tickers.",
+      "All 12 sampled liquid majors are negative over 7 days; LINK, BNB, and ADA are relative leaders but remain down.",
+      "The AI/semiconductor comparison in Telegram is a macro analogy, not evidence of crypto-token sector demand.",
       "Liquid-major breadth remains severely weak: 0% of the 12-major benchmark is positive over 7 days; relative outperformers remain negative.",
       "No token-level altcoin narrative or volume-backed rotation was verified today because the objective altcoin feed was skipped and no Telegram tickers were reported.",
       "Broad institutional altcoin breadth is completely washed out: 0% of the Top-12 Liquid Majors are positive over 24h or 7d (median 7d change -6.74%; relative outperformers LINK -4.8%, SOL -5.4%, XRP -5.6%; laggards ONDO -9.3%, SUI -12.0%, AAVE -16.3%).",
@@ -66,10 +73,10 @@
       "TRUMP"
     ],
     "channel_credibility_notes": {
-      "ProfitCircle_Official": "Today's single post is an unverified retrospective BTC short-call victory lap. Discount self-reported performance; telemetry shows views at 0.54x baseline, and no promo-spam posts were detected.",
-      "shitcapcentral": "No posts today; no new behavioral evidence.",
-      "researchcitadel": "No posts today; no new behavioral evidence.",
-      "blockchainwhispersbaby": "No posts today; no new behavioral evidence."
+      "ProfitCircle_Official": "Today's positioning narrative and bullish forecast are self-reported or predictive, not independently substantiated. No promo-spam posts detected.",
+      "shitcapcentral": "Today's December 12–14 teaser is unexplained and does not identify an asset or catalyst.",
+      "researchcitadel": "No posts today; no new evidence.",
+      "blockchainwhispersbaby": "No posts today; no new evidence."
     }
   },
   "verdict_history": [
@@ -83,9 +90,9 @@
     {
       "date": "2026-11-25",
       "phase": "Capitulation / Bottoming Watch",
-      "confidence": 95,
-      "bull_ignition_score": 40,
-      "direct_answer": "No. Today's move is not a confirmed bull-run start: BTC is down 8.14% over 7 days and 2.34% over 24 hours, while fiat stablecoin supply is contracting, BTC remains far below its key moving averages, spot volume is below average, and all 12 benchmark majors are negative over 7 days. Extreme fear, apathy, and washed-out derivatives support a bottoming watch, not an ignition call."
+      "confidence": 94,
+      "bull_ignition_score": 38,
+      "direct_answer": "No. Today's move is not the start of a confirmed bull run: BTC is down 9.00% over 7 days, remains far below its 20D/50D/200D SMAs, and has no higher-low structure. Extreme fear and washed-out derivatives make a bottoming watch appropriate, but spot demand and liquidity have not turned."
     }
   ]
 }
